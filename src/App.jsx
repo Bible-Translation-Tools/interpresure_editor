@@ -21,6 +21,9 @@ const STATIC_ENUM_COLUMNS = [
     "Information_Structure"
 ];
 
+// Fields that should use a boolean (TRUE/FALSE/N/A) select dropdown in the modal
+const BOOLEAN_FIELDS = ["IsCancelled", "IsScalar", "IsExhausted"];
+
 /**
  * Opens the IndexedDB database.
  */
@@ -140,7 +143,7 @@ const parseCSV = (csv) => {
     const lines = csv.split(/\r?\n/).filter(line => line.trim() !== '');
     if (lines.length === 0) return { headers: [], data: [] };
 
-    const headers = lines[0].split(',').map(h => h.trim());
+    const headers = lines[0].split(',').map(h => h.trim()).filter(h => h !== ''); // Filter out empty headers from trailing commas
     const data = [];
 
     for (let i = 1; i < lines.length; i++) {
@@ -244,14 +247,52 @@ const initializeEnumColumns = (currentHeaders, currentData, existingSchema = {})
 };
 
 
-// --- 3. REACT COMPONENTS ---
+// --- 3. REACT COMPONENTS & HOOKS ---
 const { useState, useEffect, useCallback, useMemo } = React;
+
+/**
+ * Custom Modal Component
+ */
+const Modal = ({ isOpen, onClose, children, title }) => {
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 flex justify-center items-center p-4" onClick={onClose}>
+            <div
+                className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto transform transition-all duration-300 scale-100 opacity-100"
+                onClick={e => e.stopPropagation()} // Prevent closing when clicking inside
+            >
+                {/* Modal Header */}
+                <div className="sticky top-0 bg-indigo-600 text-white p-4 flex justify-between items-center rounded-t-xl z-20">
+                    <h2 className="text-xl font-bold">{title}</h2>
+                    <button
+                        onClick={onClose}
+                        className="text-white hover:text-indigo-200 transition-colors"
+                        aria-label="Close modal"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                </div>
+
+                {/* Modal Body */}
+                <div className="p-6">
+                    {children}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 
 // Component for rendering a single cell
 const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, handleEdit }) => {
     const colOptions = enumOptions[colName];
-    const isLongText = value && (value.length > 50 || value.includes('\n'));
-    const rows = isLongText ? Math.max(3, Math.ceil(value.length / 50)) : undefined;
+    // Check for long text based on content or if it's a known long text field (QUD, Notes)
+    const isLongTextField = colName.includes('Question') || colName.includes('Notes');
+    const isLongText = isLongTextField || (value && (value.length > 50 || value.includes('\n')));
+    const rows = isLongText ? Math.max(2, Math.ceil((value?.length || 0) / 50)) : undefined;
 
     // Use onBlur for commit to history (less frequent updates)
     const handleBlur = (e) => handleEdit(rowId, colName, e.target.value, true); // true = commit
@@ -289,6 +330,7 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
     if (isLongText) {
         return (
             <textarea
+                type="text"
                 className={`${inputClasses} resize-y`}
                 rows={rows}
                 value={value || ''}
@@ -325,21 +367,38 @@ const App = () => {
     // History state for undo/redo
     const [history, setHistory] = useState({ past: [], future: [] });
 
-    // Modal state for Option Management
-    const [isOptionModalOpen, setIsOptionModalOpen] = useState(false);
-    const [modalColumn, setModalColumn] = useState(null);
-    const [modalOptionsText, setModalOptionsText] = useState('');
+    // New/Edit Row Modal State
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [currentFormData, setCurrentFormData] = useState({}); // Data currently in the modal form
+    const [editingRowId, setEditingRowId] = useState(null); // ID of the row being edited (null for new row)
 
-    // Modal state for Confirmation/Add/Remove Column
-    const [isConfirmationModalOpen, setIsConfirmationModalOpen] = useState(false);
-    const [confirmationAction, setConfirmationAction] = useState(null); // 'new_doc', 'add_col', or 'remove_col'
-    const [confirmationMessage, setConfirmationMessage] = useState('');
+    // UI Message State
+    const [message, setMessage] = useState(null);
 
-    // State for Add/Remove Column specific fields
-    const [newColName, setNewColName] = useState('');
-    const [isNewColEnum, setIsNewColEnum] = useState(false);
-    const [newColOptionsText, setNewColOptionsText] = useState('');
-    const [colToRemove, setColToRemove] = useState('');
+    /**
+     * Helper to show a temporary message.
+     */
+    const showMessage = (text, type = 'success') => {
+        setMessage({ text, type });
+        setTimeout(() => setMessage(null), 4000);
+    };
+
+    /**
+     * Gets an initial, empty row object based on current headers.
+     */
+    const getInitialRowData = useCallback((currentHeaders) => {
+        const data = {};
+        currentHeaders.forEach(header => {
+            if (BOOLEAN_FIELDS.includes(header)) {
+                data[header] = 'FALSE';
+            } else {
+                data[header] = '';
+            }
+        });
+        // Ensure it has a temporary ID for form tracking before save
+        data.__id = Date.now() + Math.random();
+        return data;
+    }, []);
 
     // --- History Management ---
 
@@ -349,6 +408,9 @@ const App = () => {
     const commitState = useCallback((newData, newHeaders, newEnums) => {
         setHistory(prevHistory => {
             const newPast = [...prevHistory.past, { data: data, headers: headers, enumColumns: enumColumns }];
+            // Limit history depth to prevent excessive memory use
+            if (newPast.length > 50) newPast.shift();
+
             return {
                 past: newPast,
                 future: [], // Clear future on new commit
@@ -360,7 +422,7 @@ const App = () => {
 
         // Also save the schema since it might have changed (widths are saved separately)
         saveSchema(newHeaders, newEnums, colWidths);
-    }, [data, headers, enumColumns, colWidths]); // Include colWidths here to satisfy saveSchema dependency
+    }, [data, headers, enumColumns, colWidths]);
 
 
     /**
@@ -556,7 +618,7 @@ const App = () => {
     }, [resizing, colWidths, headers, enumColumns, saveSchema]);
 
 
-    // --- Core Handlers ---
+    // --- Core Handlers (Editing existing cells) ---
 
     const handleEdit = useCallback((rowId, colName, newValue, shouldCommit) => {
         const trimmedValue = newValue.trim();
@@ -662,7 +724,15 @@ const App = () => {
     }, [commitState]);
 
 
-    // --- Add/Remove Column Modal Logic ---
+    // --- Add/Remove Column Modal Logic (Existing logic retained) ---
+
+    const [isConfirmationModalOpen, setIsConfirmationModalOpen] = useState(false);
+    const [confirmationAction, setConfirmationAction] = useState(null);
+    const [confirmationMessage, setConfirmationMessage] = useState('');
+    const [newColName, setNewColName] = useState('');
+    const [isNewColEnum, setIsNewColEnum] = useState(false);
+    const [newColOptionsText, setNewColOptionsText] = useState('');
+    const [colToRemove, setColToRemove] = useState('');
 
     const openConfirmationModal = (action, columnName = '') => {
         setConfirmationAction(action);
@@ -744,24 +814,16 @@ const App = () => {
         setColToRemove('');
     }, [confirmationAction, newColName, isNewColEnum, newColOptionsText, colToRemove, headers, data, enumColumns, commitState]);
 
-    // Helper to sync schema state after option management
-    useEffect(() => {
-        if (isOptionModalOpen === false && modalColumn !== null) {
-            // After options modal closes, commit the change to history
-            commitState(data, headers, enumColumns);
-            setModalColumn(null); // Clear to prevent repeated saving
-        }
-    }, [isOptionModalOpen, modalColumn, data, headers, enumColumns, commitState]);
+    // --- Option Management Modal Logic (Existing logic retained) ---
+    const [isOptionModalOpen, setIsOptionModalOpen] = useState(false);
+    const [modalColumn, setModalColumn] = useState(null);
+    const [modalOptionsText, setModalOptionsText] = useState('');
 
-
-    // --- Option Management Modal Logic ---
     const enumCols = useMemo(() => headers.filter(h => enumColumns[h]?.isEnum), [headers, enumColumns]);
 
     const openOptionModal = () => {
         if (enumCols.length === 0) {
-            const msgBox = document.getElementById('message-box');
-            msgBox.innerHTML = `<p class="text-sm text-red-500 p-2 bg-red-100 rounded-lg">No enum columns available to manage. Add a new enum column first.</p>`;
-            setTimeout(() => msgBox.innerHTML = '', 3000);
+            showMessage("No enum columns available to manage. Add a new enum column first.", "error");
             return;
         }
         const initialCol = enumCols[0];
@@ -799,9 +861,172 @@ const App = () => {
         setIsOptionModalOpen(false);
     };
 
+    // Helper to sync schema state after option management
+    useEffect(() => {
+        if (isOptionModalOpen === false && modalColumn !== null) {
+            // After options modal closes, commit the change to history
+            commitState(data, headers, enumColumns);
+            setModalColumn(null); // Clear to prevent repeated saving
+        }
+    }, [isOptionModalOpen, modalColumn, data, headers, enumColumns, commitState]);
+
+
+    // --- ROW MODAL LOGIC (ADD/EDIT) ---
+
+    // Function to open the modal for adding a new row
+    const openNewRowModal = () => {
+        if (headers.length > 0) {
+            setCurrentFormData(getInitialRowData(headers));
+            setEditingRowId(null); // Explicitly set to null for 'Add' mode
+            setIsModalOpen(true);
+        } else {
+            showMessage("Cannot add a row: Headers have not been loaded yet.", "error");
+        }
+    };
+
+    // Function to open the modal for editing an existing row
+    const handleRowDoubleClick = useCallback((rowId) => {
+        const rowToEdit = data.find(row => row.__id === rowId);
+        if (rowToEdit) {
+            setCurrentFormData(rowToEdit);
+            setEditingRowId(rowId); // Set the ID for 'Edit' mode
+            setIsModalOpen(true);
+        }
+    }, [data]);
+
+    const handleModalClose = () => {
+        setIsModalOpen(false);
+        setEditingRowId(null);
+    };
+
+    const handleFormInputChange = useCallback((e) => {
+        const { name, value } = e.target;
+        setCurrentFormData(prev => ({ ...prev, [name]: value }));
+    }, []);
+
+    const handleFormSubmit = (e) => {
+        e.preventDefault();
+
+        // Simple validation: check if 'GreekText' is filled
+        if (!currentFormData.GreekText || currentFormData.GreekText.trim() === '') {
+            showMessage("The 'GreekText' field is required.", "error");
+            return;
+        }
+
+        let newData;
+        let successMessage = '';
+
+        // 1. Determine if we are ADDING or EDITING
+        if (editingRowId) {
+            // EDITING MODE
+            newData = data.map(row => {
+                if (row.__id === editingRowId) {
+                    return currentFormData;
+                }
+                return row;
+            });
+            successMessage = `Row edited successfully!`;
+        } else {
+            // ADDING MODE
+            // Ensure the new row has a stable unique ID before commit
+            const newEntry = { ...currentFormData, __id: Date.now() + Math.random() };
+            newData = [...data, newEntry];
+            successMessage = `New row added successfully!`;
+        }
+
+        // 2. Check for new enum options (same logic as before)
+        let newEnums = enumColumns;
+        for (const colName of headers) {
+            const value = currentFormData[colName];
+            if (enumColumns[colName]?.isEnum && value !== '' && !enumColumns[colName].options.has(value)) {
+                newEnums = { ...newEnums };
+                const newOptions = new Set(newEnums[colName].options);
+                newOptions.add(value);
+                newEnums[colName] = { ...newEnums[colName], options: newOptions };
+            }
+        }
+
+        // 3. Commit the new state to history
+        commitState(newData, headers, newEnums);
+
+        // 4. Close modal, reset form state, and show success
+        handleModalClose();
+        showMessage(successMessage, 'success');
+    };
+
+    const renderFormField = (header) => {
+        const isEnum = enumColumns[header]?.isEnum;
+        const isBoolean = BOOLEAN_FIELDS.includes(header);
+        const inputId = `form-input-${header}`;
+
+        const baseClasses = "mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition duration-150";
+
+        // Determine if this should be a large textarea
+        const isLongTextField = header.includes('Question') || header.includes('Notes') || header.includes('InferredProposition');
+
+        return (
+            <div key={header} className="p-2">
+                <label htmlFor={inputId} className="block text-xs font-medium text-gray-700 mb-1 uppercase tracking-wider">
+                    {header}
+                    {header === 'GreekText' && <span className="text-red-500 ml-1 font-bold">*</span>}
+                    {isEnum && <span className="text-indigo-500 ml-1 text-xs font-normal">(Enum)</span>}
+                </label>
+
+                {isEnum ? (
+                    <select
+                        id={inputId}
+                        name={header}
+                        value={currentFormData[header] || ''}
+                        onChange={handleFormInputChange}
+                        className={baseClasses}
+                    >
+                        <option value="">(None)</option>
+                        {Array.from(enumColumns[header].options).sort().map((optionText, index) => (
+                            <option key={index} value={optionText}>
+                                {optionText}
+                            </option>
+                        ))}
+                    </select>
+                ) : isBoolean ? (
+                    <select
+                        id={inputId}
+                        name={header}
+                        value={currentFormData[header] || 'FALSE'}
+                        onChange={handleFormInputChange}
+                        className={baseClasses}
+                    >
+                        <option value="TRUE">TRUE</option>
+                        <option value="FALSE">FALSE</option>
+                        <option value="N/A">N/A</option>
+                    </select>
+                ) : isLongTextField ? (
+                    <textarea
+                        id={inputId}
+                        name={header}
+                        value={currentFormData[header] || ''}
+                        onChange={handleFormInputChange}
+                        rows={isLongTextField ? 3 : 1}
+                        className={`${baseClasses} resize-y bg-gray-50`}
+                    />
+                ) : (
+                    <input
+                        id={inputId}
+                        type="text"
+                        name={header}
+                        value={currentFormData[header] || ''}
+                        onChange={handleFormInputChange}
+                        className={`${baseClasses} bg-gray-50`}
+                    />
+                )}
+            </div>
+        );
+    };
+
+
     // --- Modal Markup (Combined for simplicity) ---
     const columnModificationModal = (
         <div className={isConfirmationModalOpen ? "fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-75" : "hidden"}>
+            {/* Confirmation Modal Content (Add/Remove Column, New Doc) */}
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 m-4">
                 <h2 className="text-xl font-bold mb-4">
                     {confirmationAction === 'new_doc' && 'Confirm New Document'}
@@ -904,6 +1129,7 @@ const App = () => {
 
     const optionManagementModal = (
         <div className={isOptionModalOpen ? "fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-75" : "hidden"}>
+            {/* Option Management Modal Content */}
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 m-4">
                 <h2 className="text-2xl font-bold mb-4">Manage Enum Options</h2>
 
@@ -951,18 +1177,30 @@ const App = () => {
         </div>
     );
 
+
     // --- Main Render ---
 
     return (
         <div className="p-4 md:p-8 min-h-screen">
 
-            {/* Title and Controls (Now uses full width) */}
+            {/* Title and Controls */}
             <div className="mb-6 bg-white p-6 rounded-xl shadow-lg">
                 <h1 className="text-3xl font-extrabold text-gray-900 mb-2">CSV Annotation Editor</h1>
                 <p className="text-gray-600 mb-4">
-                    Edit annotations in the table below. The schema (headers, dropdown options, and **column widths**) are saved automatically and carry over to new documents.
-                    <span className="font-semibold text-indigo-500">All data changes are trackable with Undo/Redo.</span>
+                    Edit annotations in the table below. **Double-click any row to open the full edit form.**
                 </p>
+
+                {/* Status Message Display */}
+                {message && (
+                    <div
+                        className={`p-3 rounded-lg text-sm mb-4 shadow-md ${
+                            message.type === 'success' ? 'bg-green-100 text-green-800 border border-green-300' :
+                                'bg-red-100 text-red-800 border border-red-300'
+                        }`}
+                    >
+                        {message.text}
+                    </div>
+                )}
 
                 <div className="flex flex-wrap gap-3 items-center">
                     {/* History Controls */}
@@ -979,6 +1217,18 @@ const App = () => {
                         title="Redo Last Undo (Ctrl+Y)"
                         className="flex-shrink-0 bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 disabled:opacity-30">
                         Redo ({history.future.length})
+                    </button>
+
+                    {/* Data Entry Control */}
+                    <button
+                        onClick={openNewRowModal}
+                        disabled={loadingMessage !== null}
+                        title="Add a new row with a full-screen form"
+                        className="flex-shrink-0 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 disabled:opacity-30 flex items-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
+                        </svg>
+                        Add New Row
                     </button>
 
                     {/* Document Controls */}
@@ -1025,7 +1275,7 @@ const App = () => {
             {/* Error/Success Message Box for non-modal messages (Now uses full width) */}
             <div id="message-box" className="mb-4 h-6"></div>
 
-            {/* Data Table Container (Now uses full width, handles its own overflow) */}
+            {/* Data Table Container (Scrollable) */}
             <div className="bg-white rounded-xl shadow-lg overflow-hidden">
                 <div id="table-container" className="table-container p-4 overflow-x-auto overflow-y-auto max-h-[70vh]">
                     {loadingMessage ? (
@@ -1055,7 +1305,12 @@ const App = () => {
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
                             {data.map((row) => (
-                                <tr key={row.__id} className='hover:bg-gray-50'>
+                                <tr
+                                    key={row.__id}
+                                    className='hover:bg-gray-100 cursor-pointer transition-colors duration-150'
+                                    onDoubleClick={() => handleRowDoubleClick(row.__id)}
+                                    title="Double-click to edit row in full form"
+                                >
                                     {headers.map((header) => (
                                         <td
                                             key={header}
@@ -1079,6 +1334,35 @@ const App = () => {
                     )}
                 </div>
             </div>
+
+            {/* NEW/EDIT ROW MODAL */}
+            <Modal
+                isOpen={isModalOpen}
+                onClose={handleModalClose}
+                title={editingRowId ? "Edit Existing Annotation Row" : "Add New Annotation Row"}
+            >
+                <form onSubmit={handleFormSubmit}>
+                    <div className="grid-form">
+                        {headers.map(renderFormField)}
+                    </div>
+
+                    <div className="mt-8 pt-4 border-t flex justify-end space-x-3">
+                        <button
+                            type="button"
+                            onClick={handleModalClose}
+                            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition duration-150"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="submit"
+                            className="px-4 py-2 text-sm font-medium text-white bg-green-600 border border-transparent rounded-md shadow-sm hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition duration-150"
+                        >
+                            {editingRowId ? "Save Changes" : "Save New Row"}
+                        </button>
+                    </div>
+                </form>
+            </Modal>
 
             {optionManagementModal}
             {columnModificationModal}
