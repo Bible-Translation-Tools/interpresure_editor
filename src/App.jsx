@@ -7,7 +7,11 @@ const IDB_NAME = 'CSVEditorDB';
 const IDB_VERSION = 2;
 const IDB_STORE_NAME = 'csv_data_store';
 const DATA_KEY = 'current_csv_data'; // The current table content (transient)
-const SCHEMA_KEY = 'persistent_csv_schema'; // Headers and Enum options (persistent)
+const SCHEMA_KEY = 'persistent_csv_schema'; // Headers, Enum options, and Column Widths (persistent)
+
+// Constants for Resizing
+const MIN_COL_WIDTH = 100;
+const DEFAULT_COL_WIDTH = 150;
 
 // Static list of columns that must be treated as Enums
 const STATIC_ENUM_COLUMNS = [
@@ -52,7 +56,7 @@ const saveToDB = async (key, dataToSave) => {
         const store = transaction.objectStore(IDB_STORE_NAME);
 
         // Convert Sets to Arrays for storage compatibility when saving schema
-        if (dataToSave && dataToSave.enumColumns) {
+        if (key === SCHEMA_KEY && dataToSave && dataToSave.enumColumns) {
             const serializableEnums = {};
             for (const col in dataToSave.enumColumns) {
                 serializableEnums[col] = {
@@ -93,7 +97,7 @@ const loadFromDB = async (key) => {
                 let result = event.target.result;
 
                 // Convert Arrays back to Sets for use in React state when loading schema
-                if (result && result.enumColumns) {
+                if (key === SCHEMA_KEY && result && result.enumColumns) {
                     const deserializedEnums = {};
                     for (const col in result.enumColumns) {
                         deserializedEnums[col] = {
@@ -314,6 +318,10 @@ const App = () => {
     const [enumColumns, setEnumColumns] = useState({});
     const [loadingMessage, setLoadingMessage] = useState('Loading...');
 
+    // Column Resizing State
+    const [colWidths, setColWidths] = useState({});
+    const [resizing, setResizing] = useState(null); // { startX, startWidth, colName }
+
     // History state for undo/redo
     const [history, setHistory] = useState({ past: [], future: [] });
 
@@ -350,9 +358,10 @@ const App = () => {
         setHeaders(newHeaders);
         setEnumColumns(newEnums);
 
-        // Also save the schema since it might have changed
-        saveSchema(newHeaders, newEnums);
-    }, [data, headers, enumColumns]); // Dependencies must be current state variables
+        // Also save the schema since it might have changed (widths are saved separately)
+        saveSchema(newHeaders, newEnums, colWidths);
+    }, [data, headers, enumColumns, colWidths]); // Include colWidths here to satisfy saveSchema dependency
+
 
     /**
      * Sets the state from a history object (undo/redo).
@@ -361,8 +370,10 @@ const App = () => {
         setData(historyState.data);
         setHeaders(historyState.headers);
         setEnumColumns(historyState.enumColumns);
-        saveSchema(historyState.headers, historyState.enumColumns); // Save schema on restore
-    }, []);
+
+        // When restoring state, we keep the current column widths (UI preference)
+        saveSchema(historyState.headers, historyState.enumColumns, colWidths);
+    }, [colWidths]);
 
     const undo = useCallback(() => {
         if (history.past.length === 0) return;
@@ -397,8 +408,13 @@ const App = () => {
         saveToDB(DATA_KEY, { data, headers });
     }, [data, headers]);
 
-    const saveSchema = useCallback((currentHeaders, currentEnums) => {
-        saveToDB(SCHEMA_KEY, { headers: currentHeaders, enumColumns: currentEnums });
+    // Combined schema save (headers, enums, widths)
+    const saveSchema = useCallback((currentHeaders, currentEnums, currentWidths) => {
+        saveToDB(SCHEMA_KEY, {
+            headers: currentHeaders,
+            enumColumns: currentEnums,
+            colWidths: currentWidths
+        });
     }, []);
 
     // --- EFFECT 1: Initial Load ---
@@ -406,10 +422,11 @@ const App = () => {
         const loadInitialData = async () => {
             setLoadingMessage('Checking for saved schema and data...');
 
-            // 1. Load persistent Schema (Headers & Enum Options)
+            // 1. Load persistent Schema (Headers, Enum Options, Widths)
             const savedSchema = await loadFromDB(SCHEMA_KEY);
             const persistentHeaders = savedSchema?.headers || [];
             const persistentEnums = savedSchema?.enumColumns || {};
+            const initialColWidths = savedSchema?.colWidths || {};
 
             // 2. Load transient Document Data
             const savedData = await loadFromDB(DATA_KEY);
@@ -429,10 +446,17 @@ const App = () => {
                 const finalHeadersSet = new Set([...fileOrSavedHeaders, ...persistentHeaders]);
                 const finalHeaders = Array.from(finalHeadersSet);
 
-                // Re-initialize enums based on the final headers and the persistent enum options
+                // Initialize/re-initialize enums
                 const finalEnums = initializeEnumColumns(finalHeaders, initialDataResult.data, persistentEnums);
 
-                // Ensure all rows have all headers (add empty string for new columns)
+                // Initialize/re-initialize widths
+                const finalColWidths = finalHeaders.reduce((acc, header) => {
+                    // Use saved width, or default if not saved
+                    acc[header] = initialColWidths[header] || DEFAULT_COL_WIDTH;
+                    return acc;
+                }, {});
+
+                // Ensure all rows have all headers
                 const dataWithCompleteHeaders = initialDataResult.data.map((row, i) => {
                     const newRow = { ...row, __id: row.__id || Date.now() + i + Math.random() };
                     finalHeaders.forEach(h => {
@@ -444,13 +468,14 @@ const App = () => {
                 setHeaders(finalHeaders);
                 setData(dataWithCompleteHeaders);
                 setEnumColumns(finalEnums);
+                setColWidths(finalColWidths);
                 setLoadingMessage(null);
 
                 // Set the initial state as the first item in the history (not committed, just current)
                 setHistory({ past: [], future: [] });
 
                 // Save the (potentially updated) schema on first load
-                saveSchema(finalHeaders, finalEnums);
+                saveSchema(finalHeaders, finalEnums, finalColWidths);
 
             } catch (error) {
                 console.error("Error processing data:", error);
@@ -462,13 +487,74 @@ const App = () => {
     }, [saveSchema]);
 
 
-    // --- EFFECT 2: Auto-save Document Data ---
+    // --- EFFECT 2: Auto-save Document Data (transient data) ---
     useEffect(() => {
         if (data.length > 0 && headers.length > 0 && loadingMessage === null) {
             const timeoutId = setTimeout(saveDocumentData, 500); // Debounce save
             return () => clearTimeout(timeoutId);
         }
     }, [data, saveDocumentData, headers, loadingMessage]);
+
+    // --- EFFECT 3: Column Resizing Logic ---
+    const startResize = useCallback((e, colName) => {
+        // Prevent default to stop text selection during drag
+        e.preventDefault();
+
+        // Find the current width of the column from the DOM element (the TH)
+        const th = e.currentTarget.parentElement;
+
+        setResizing({
+            startX: e.clientX,
+            startWidth: th.offsetWidth,
+            colName: colName
+        });
+    }, []);
+
+    // Global listener setup/teardown for resizing
+    useEffect(() => {
+        if (!resizing) return;
+
+        const doResize = (e) => {
+            const delta = e.clientX - resizing.startX;
+            let newWidth = resizing.startWidth + delta;
+
+            // Enforce minimum width
+            if (newWidth < MIN_COL_WIDTH) {
+                newWidth = MIN_COL_WIDTH;
+            }
+
+            setColWidths(prevWidths => ({
+                ...prevWidths,
+                [resizing.colName]: newWidth
+            }));
+        };
+
+        const stopResize = () => {
+            setResizing(null);
+        };
+
+        window.addEventListener('mousemove', doResize);
+        window.addEventListener('mouseup', stopResize);
+
+        // Cleanup function for listeners
+        return () => {
+            window.removeEventListener('mousemove', doResize);
+            window.removeEventListener('mouseup', stopResize);
+        };
+    }, [resizing]); // Only depend on resizing state
+
+    // Persistence effect: Triggers schema save when resizing is done
+    useEffect(() => {
+        // Only run when resizing completes (goes from active to null) and we have data
+        if (resizing === null && Object.keys(colWidths).length > 0) {
+            // Use a short delay to ensure `colWidths` state is finalized from `doResize`
+            const timeoutId = setTimeout(() => {
+                saveSchema(headers, enumColumns, colWidths);
+            }, 50);
+            return () => clearTimeout(timeoutId);
+        }
+    }, [resizing, colWidths, headers, enumColumns, saveSchema]);
+
 
     // --- Core Handlers ---
 
@@ -532,6 +618,7 @@ const App = () => {
             const savedSchema = await loadFromDB(SCHEMA_KEY);
             const persistentHeaders = savedSchema?.headers || [];
             const persistentEnums = savedSchema?.enumColumns || {};
+            const persistentWidths = savedSchema?.colWidths || {};
 
             const reader = new FileReader();
             reader.onload = function(event) {
@@ -545,6 +632,12 @@ const App = () => {
                     // Re-initialize enums structure
                     const finalEnums = initializeEnumColumns(finalHeaders, result.data, persistentEnums);
 
+                    // Re-initialize widths
+                    const finalColWidths = finalHeaders.reduce((acc, header) => {
+                        acc[header] = persistentWidths[header] || DEFAULT_COL_WIDTH;
+                        return acc;
+                    }, {});
+
                     // Ensure all rows have the full set of headers
                     const dataWithCompleteHeaders = result.data.map((row, i) => {
                         const newRow = { ...row, __id: i + 1 + Math.random() };
@@ -554,6 +647,7 @@ const App = () => {
                         return newRow;
                     });
 
+                    setColWidths(finalColWidths); // Update widths immediately
                     // Commit the new file load as a history action
                     commitState(dataWithCompleteHeaders, finalHeaders, finalEnums);
                     setLoadingMessage(null);
@@ -611,6 +705,12 @@ const App = () => {
                     [trimmedColName]: { isEnum: isNewColEnum, options: newOptions }
                 };
 
+                // Set default width for the new column
+                setColWidths(prevWidths => ({
+                    ...prevWidths,
+                    [trimmedColName]: DEFAULT_COL_WIDTH
+                }));
+
                 // Commit adding column
                 commitState(updatedData, updatedHeaders, updatedEnums);
             }
@@ -626,6 +726,12 @@ const App = () => {
 
             const updatedEnums = { ...enumColumns };
             delete updatedEnums[colToRemove];
+
+            // Remove width setting for the deleted column (will be persisted via saveSchema call in commitState)
+            setColWidths(prevWidths => {
+                const { [colToRemove]: _, ...rest } = prevWidths;
+                return rest;
+            });
 
             // Commit removing column
             commitState(updatedData, updatedHeaders, updatedEnums);
@@ -850,12 +956,12 @@ const App = () => {
     return (
         <div className="p-4 md:p-8 min-h-screen">
 
-            {/* Title and Controls */}
-            <div className="max-w-7xl mx-auto mb-6 bg-white p-6 rounded-xl shadow-lg">
+            {/* Title and Controls (Now uses full width) */}
+            <div className="mb-6 bg-white p-6 rounded-xl shadow-lg">
                 <h1 className="text-3xl font-extrabold text-gray-900 mb-2">CSV Annotation Editor</h1>
                 <p className="text-gray-600 mb-4">
-                    Edit annotations in the table below. The schema (headers and dropdown options) are saved automatically and carry over to new documents.
-                    <span className="font-semibold text-indigo-500">All changes are auto-saved and trackable with Undo/Redo.</span>
+                    Edit annotations in the table below. The schema (headers, dropdown options, and **column widths**) are saved automatically and carry over to new documents.
+                    <span className="font-semibold text-indigo-500">All data changes are trackable with Undo/Redo.</span>
                 </p>
 
                 <div className="flex flex-wrap gap-3 items-center">
@@ -916,11 +1022,11 @@ const App = () => {
                 </div>
             </div>
 
-            {/* Error/Success Message Box for non-modal messages */}
-            <div id="message-box" className="max-w-7xl mx-auto mb-4 h-6"></div>
+            {/* Error/Success Message Box for non-modal messages (Now uses full width) */}
+            <div id="message-box" className="mb-4 h-6"></div>
 
-            {/* Data Table Container */}
-            <div className="max-w-7xl mx-auto bg-white rounded-xl shadow-lg overflow-hidden">
+            {/* Data Table Container (Now uses full width, handles its own overflow) */}
+            <div className="bg-white rounded-xl shadow-lg overflow-hidden">
                 <div id="table-container" className="table-container p-4 overflow-x-auto overflow-y-auto max-h-[70vh]">
                     {loadingMessage ? (
                         <p className="text-center text-gray-500 py-10 text-lg font-medium">{loadingMessage}</p>
@@ -931,10 +1037,18 @@ const App = () => {
                                 {headers.map((header) => (
                                     <th
                                         key={header}
-                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
+                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap relative"
+                                        style={{ width: colWidths[header] + 'px' }}
                                     >
                                         {header}
                                         {enumColumns[header]?.isEnum && <span className="ml-1 text-indigo-500 text-xs">(Enum)</span>}
+
+                                        {/* Resize Handle */}
+                                        <div
+                                            onMouseDown={(e) => startResize(e, header)}
+                                            className="resize-handle"
+                                            title={`Resize ${header} column`}
+                                        />
                                     </th>
                                 ))}
                             </tr>
@@ -943,7 +1057,11 @@ const App = () => {
                             {data.map((row) => (
                                 <tr key={row.__id} className='hover:bg-gray-50'>
                                     {headers.map((header) => (
-                                        <td key={header} className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 border-t border-gray-200">
+                                        <td
+                                            key={header}
+                                            className="px-3 py-2 text-sm text-gray-900 border-t border-gray-200"
+                                            style={{ width: colWidths[header] + 'px' }}
+                                        >
                                             <EditableCell
                                                 rowId={row.__id}
                                                 colName={header}
