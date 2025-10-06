@@ -12,14 +12,15 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'pnpm'
-      - name: Install pnpm
-        run: npm install -g pnpm
-
+          node-version: 20
+          cache: "pnpm"
       - name: Install dependencies
         run: pnpm install
       - name: Install Rust toolchain
@@ -41,13 +42,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'pnpm'
-      - name: Install pnpm
-        run: npm install -g pnpm
+          node-version: 20
+          cache: "pnpm"
       - name: Install dependencies
         run: pnpm install
       - name: Install Rust toolchain
@@ -75,13 +78,15 @@ jobs:
       image: ghcr.io/tauri-apps/tauri-action:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'pnpm'
-      - name: Install pnpm
-        run: npm install -g pnpm
+          node-version: 20
+          cache: "pnpm"
       - name: Install dependencies
         run: pnpm install
 
