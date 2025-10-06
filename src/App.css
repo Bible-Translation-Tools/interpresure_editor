@@ -1,1 +1,62 @@
 @import "tailwindcss";
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f3f4f6; /* Light gray background */
+}
+.editable-cell {
+    min-height: 44px; /* Ensure inputs/selects meet touch target size */
+}
+.table-container {
+    /* Fix for sticky headers on mobile devices */
+    -webkit-overflow-scrolling: touch;
+}
+/* Custom styles for the table and scrollbar */
+.table-container::-webkit-scrollbar { width: 12px; height: 12px; }
+.table-container::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 6px; border: 3px solid #f3f4f6; }
+.table-container::-webkit-scrollbar-track { background-color: #f3f4f6; }
+.editable-cell, .editable-select { transition: all 0.15s; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
+.editable-cell:focus, .editable-select:focus { border-color: #3b82f6; outline: none; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25); }
+
+/* IMPORTANT: Make TH relative for resize handle, ensure widths are controlled */
+th {
+    position: sticky;
+    top: 0;
+    background-color: #ffffff;
+    z-index: 10;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    min-width: 100px; /* Base min width */
+    padding-right: 12px; /* Ensure space for the handle */
+}
+
+/* Ensure table-layout is fixed for controlled column widths */
+#data-table {
+    table-layout: fixed;
+    /* Allows table to naturally exceed container width and trigger scroll */
+}
+td, th {
+    overflow: hidden; /* Prevent text overflow during resize */
+    box-sizing: border-box; /* Include padding/border in width calculation */
+}
+
+/* Styling for the resize handle */
+.resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 8px; /* Touch target size */
+    height: 100%;
+    cursor: col-resize;
+    transition: background-color 0.15s;
+}
+.resize-handle:hover {
+    background-color: #3b82f6; /* Tailwind indigo-500 */
+}
+
+/* Custom form grid for modal */
+.grid-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+}
+rustup target add x86_64-pc-windows-msvc

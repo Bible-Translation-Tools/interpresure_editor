@@ -10,8 +10,8 @@ const DATA_KEY = 'current_csv_data'; // The current table content (transient)
 const SCHEMA_KEY = 'persistent_csv_schema'; // Headers, Enum options, and Column Widths (persistent)
 
 // Constants for Resizing
-const MIN_COL_WIDTH = 100;
-const DEFAULT_COL_WIDTH = 150;
+const MIN_COL_WIDTH = 150;
+const DEFAULT_COL_WIDTH = 250;
 
 // Static list of columns that must be treated as Enums
 const STATIC_ENUM_COLUMNS = [
@@ -375,6 +375,9 @@ const App = () => {
     // UI Message State
     const [message, setMessage] = useState(null);
 
+    // Option Management State (NEW: Store original options for rename detection)
+    const [originalOptionsMap, setOriginalOptionsMap] = useState(new Map()); // Map to track options before edit for rename detection
+
     /**
      * Helper to show a temporary message.
      */
@@ -558,26 +561,47 @@ const App = () => {
     }, [data, saveDocumentData, headers, loadingMessage]);
 
     // --- EFFECT 3: Column Resizing Logic ---
-    const startResize = useCallback((e, colName) => {
-        // Prevent default to stop text selection during drag
-        e.preventDefault();
 
-        // Find the current width of the column from the DOM element (the TH)
+    /**
+     * Starts the resizing process on mouse or touch down.
+     */
+    const startResize = useCallback((e, colName) => {
+        e.preventDefault();
+        e.stopPropagation(); // Stop propagation to ensure we capture the mouse events globally
+
+        // Use clientX from mouse event or the first touch point
+        const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+        if (!clientX) return;
+
+        // e.currentTarget is the resize-handle div, parent is the th
         const th = e.currentTarget.parentElement;
 
         setResizing({
-            startX: e.clientX,
+            startX: clientX,
             startWidth: th.offsetWidth,
             colName: colName
         });
+
+        // CRITICAL FIX: Set cursor on body to signal drag start
+        document.body.style.cursor = 'col-resize';
     }, []);
 
     // Global listener setup/teardown for resizing
     useEffect(() => {
         if (!resizing) return;
 
+        /**
+         * Handles mouse or touch movement during resize.
+         */
         const doResize = (e) => {
-            const delta = e.clientX - resizing.startX;
+            // Prevent default touch actions like scrolling/zooming
+            if (e.type === 'touchmove') e.preventDefault();
+
+            // Use clientX from mouse event or the first touch point
+            const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+            if (!clientX) return;
+
+            const delta = clientX - resizing.startX;
             let newWidth = resizing.startWidth + delta;
 
             // Enforce minimum width
@@ -591,24 +615,36 @@ const App = () => {
             }));
         };
 
+        /**
+         * Ends the resizing process on mouse or touch release.
+         */
         const stopResize = () => {
             setResizing(null);
+            // CRITICAL FIX: Reset cursor on body immediately
+            document.body.style.cursor = '';
         };
 
+        // Attach listeners for mouse and touch events globally on window
         window.addEventListener('mousemove', doResize);
         window.addEventListener('mouseup', stopResize);
+        window.addEventListener('touchmove', doResize, { passive: false }); // Needs passive: false to allow preventDefault
+        window.addEventListener('touchend', stopResize);
 
         // Cleanup function for listeners
         return () => {
             window.removeEventListener('mousemove', doResize);
             window.removeEventListener('mouseup', stopResize);
+            window.removeEventListener('touchmove', doResize);
+            window.removeEventListener('touchend', stopResize);
+            // Safety: Ensure cursor is reset on cleanup/unmount
+            document.body.style.cursor = '';
         };
-    }, [resizing]); // Only depend on resizing state
+    }, [resizing]); // Only depends on resizing state (goes from null to object, and back)
 
     // Persistence effect: Triggers schema save when resizing is done
     useEffect(() => {
         // Only run when resizing completes (goes from active to null) and we have data
-        if (resizing === null && Object.keys(colWidths).length > 0) {
+        if (resizing === null && Object.keys(colWidths).length > 0 && headers.length > 0) {
             // Use a short delay to ensure `colWidths` state is finalized from `doResize`
             const timeoutId = setTimeout(() => {
                 saveSchema(headers, enumColumns, colWidths);
@@ -831,6 +867,11 @@ const App = () => {
 
         const optionsArray = Array.from(enumColumns[initialCol].options).sort();
         setModalOptionsText(optionsArray.join('\n'));
+
+        // NEW: Capture the initial options map for rename detection
+        const initialMap = new Map(optionsArray.map(opt => [opt, opt]));
+        setOriginalOptionsMap(initialMap);
+
         setIsOptionModalOpen(true);
     };
 
@@ -839,6 +880,10 @@ const App = () => {
         setModalColumn(selectedCol);
         const optionsArray = Array.from(enumColumns[selectedCol].options).sort();
         setModalOptionsText(optionsArray.join('\n'));
+
+        // NEW: Capture the initial options map for rename detection
+        const initialMap = new Map(optionsArray.map(opt => [opt, opt]));
+        setOriginalOptionsMap(initialMap);
     };
 
     const saveOptions = () => {
@@ -849,27 +894,60 @@ const App = () => {
             .map(line => line.trim())
             .filter(line => line !== '');
 
-        // Update global state, then let useEffect trigger the commit
-        setEnumColumns(prevEnums => ({
-            ...prevEnums,
-            [modalColumn]: {
-                ...prevEnums[modalColumn],
-                options: new Set(newOptionsArray)
+        const originalSortedOptions = Array.from(originalOptionsMap.keys()).sort();
+        const originalSet = new Set(originalSortedOptions);
+        const newOptionsSet = new Set(newOptionsArray);
+
+        // Identify options deleted from original and options added to the new list
+        const deletedOptions = originalSortedOptions.filter(opt => !newOptionsSet.has(opt));
+        const addedOptions = newOptionsArray.filter(opt => !originalSet.has(opt));
+
+        const optionsToRename = {};
+        let uniqueRowsAffected = 0;
+
+        // Heuristic: If deleted count equals added count, assume they are 1:1 renames
+        if (deletedOptions.length === addedOptions.length && deletedOptions.length > 0) {
+            for (let i = 0; i < deletedOptions.length; i++) {
+                optionsToRename[deletedOptions[i]] = addedOptions[i];
             }
-        }));
+        }
+
+        // 1. Update Data Rows (Core requirement: Rename data in the table)
+        let newData = data;
+        if (Object.keys(optionsToRename).length > 0) {
+            const affectedRowIds = new Set();
+
+            newData = data.map(row => {
+                const oldValue = row[modalColumn];
+                const newValue = optionsToRename[oldValue];
+
+                if (newValue) {
+                    affectedRowIds.add(row.__id);
+                    return { ...row, [modalColumn]: newValue };
+                }
+                return row;
+            });
+
+            uniqueRowsAffected = affectedRowIds.size;
+            showMessage(`Successfully renamed option(s) in column '${modalColumn}'. Updated ${uniqueRowsAffected} row(s).`, 'success');
+        }
+
+        // 2. Update Schema (Enum Options)
+        const newEnums = {
+            ...enumColumns,
+            [modalColumn]: {
+                ...enumColumns[modalColumn],
+                options: newOptionsSet // Use the set derived from the textarea
+            }
+        };
+
+        // 3. Commit State and Clean Up
+        commitState(newData, headers, newEnums);
 
         setIsOptionModalOpen(false);
+        setModalColumn(null); // Clear to prevent repeated saving
+        setOriginalOptionsMap(new Map()); // Reset the map after use
     };
-
-    // Helper to sync schema state after option management
-    useEffect(() => {
-        if (isOptionModalOpen === false && modalColumn !== null) {
-            // After options modal closes, commit the change to history
-            commitState(data, headers, enumColumns);
-            setModalColumn(null); // Clear to prevent repeated saving
-        }
-    }, [isOptionModalOpen, modalColumn, data, headers, enumColumns, commitState]);
-
 
     // --- ROW MODAL LOGIC (ADD/EDIT) ---
 
@@ -1158,6 +1236,7 @@ const App = () => {
                         onChange={(e) => setModalOptionsText(e.target.value)}
                         disabled={!modalColumn}
                     ></textarea>
+                    <p className="text-xs text-gray-500 mt-1">If you rename an option, all rows using the old name in this column will be updated.</p>
                 </div>
 
                 <div className="flex justify-end space-x-3">
@@ -1168,7 +1247,10 @@ const App = () => {
                         Save Options
                     </button>
                     <button
-                        onClick={() => setIsOptionModalOpen(false)}
+                        onClick={() => {
+                            setIsOptionModalOpen(false);
+                            setOriginalOptionsMap(new Map()); // Clear the map on close
+                        }}
                         className="bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-2 px-4 rounded-lg transition duration-150">
                         Close
                     </button>
@@ -1293,9 +1375,10 @@ const App = () => {
                                         {header}
                                         {enumColumns[header]?.isEnum && <span className="ml-1 text-indigo-500 text-xs">(Enum)</span>}
 
-                                        {/* Resize Handle */}
+                                        {/* Resize Handle - Handles both mouse down and touch start */}
                                         <div
                                             onMouseDown={(e) => startResize(e, header)}
+                                            onTouchStart={(e) => startResize(e, header)}
                                             className="resize-handle"
                                             title={`Resize ${header} column`}
                                         />
