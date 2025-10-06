@@ -52,7 +52,7 @@ const saveToDB = async (key, dataToSave) => {
         const store = transaction.objectStore(IDB_STORE_NAME);
 
         // Convert Sets to Arrays for storage compatibility when saving schema
-        if (key === SCHEMA_KEY && dataToSave.enumColumns) {
+        if (dataToSave && dataToSave.enumColumns) {
             const serializableEnums = {};
             for (const col in dataToSave.enumColumns) {
                 serializableEnums[col] = {
@@ -93,7 +93,7 @@ const loadFromDB = async (key) => {
                 let result = event.target.result;
 
                 // Convert Arrays back to Sets for use in React state when loading schema
-                if (key === SCHEMA_KEY && result && result.enumColumns) {
+                if (result && result.enumColumns) {
                     const deserializedEnums = {};
                     for (const col in result.enumColumns) {
                         deserializedEnums[col] = {
@@ -164,7 +164,7 @@ const parseCSV = (csv) => {
                 rowObject[headers[index]] = value;
             }
         });
-        rowObject.__id = Date.now() + i; // Use timestamp + index for unique ID
+        rowObject.__id = Date.now() + i + Math.random(); // Unique ID
         data.push(rowObject);
     }
 
@@ -249,8 +249,11 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
     const isLongText = value && (value.length > 50 || value.includes('\n'));
     const rows = isLongText ? Math.max(3, Math.ceil(value.length / 50)) : undefined;
 
-    const handleBlur = (e) => handleEdit(rowId, colName, e.target.value);
-    const handleChange = (e) => handleEdit(rowId, colName, e.target.value);
+    // Use onBlur for commit to history (less frequent updates)
+    const handleBlur = (e) => handleEdit(rowId, colName, e.target.value, true); // true = commit
+
+    // Use onChange to update the cell's value temporarily (no commit)
+    const handleChange = (e) => handleEdit(rowId, colName, e.target.value, false); // false = no commit
 
     const inputClasses = "editable-cell p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full text-sm";
     const selectClasses = "editable-select p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full bg-white text-sm";
@@ -267,6 +270,7 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
                 className={selectClasses}
                 value={value || ''}
                 onChange={handleChange}
+                onBlur={(e) => handleEdit(rowId, colName, e.target.value, true)} // Select blur commits
             >
                 <option value="">(None)</option>
                 {currentOptions.map((optionText, index) => (
@@ -285,7 +289,7 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
                 rows={rows}
                 value={value || ''}
                 onBlur={handleBlur}
-                onChange={(e) => handleEdit(rowId, colName, e.target.value, false)}
+                onChange={handleChange}
             />
         );
     }
@@ -296,7 +300,7 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
             className={inputClasses}
             value={value || ''}
             onBlur={handleBlur}
-            onChange={(e) => handleEdit(rowId, colName, e.target.value, false)}
+            onChange={handleChange}
         />
     );
 });
@@ -304,25 +308,88 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
 
 // Main Application Component
 const App = () => {
+    // Current state being displayed
     const [data, setData] = useState([]);
     const [headers, setHeaders] = useState([]);
     const [enumColumns, setEnumColumns] = useState({});
     const [loadingMessage, setLoadingMessage] = useState('Loading...');
+
+    // History state for undo/redo
+    const [history, setHistory] = useState({ past: [], future: [] });
 
     // Modal state for Option Management
     const [isOptionModalOpen, setIsOptionModalOpen] = useState(false);
     const [modalColumn, setModalColumn] = useState(null);
     const [modalOptionsText, setModalOptionsText] = useState('');
 
-    // Modal state for Confirmation/Add Column
+    // Modal state for Confirmation/Add/Remove Column
     const [isConfirmationModalOpen, setIsConfirmationModalOpen] = useState(false);
-    const [confirmationAction, setConfirmationAction] = useState(null); // 'new_doc' or 'add_col'
+    const [confirmationAction, setConfirmationAction] = useState(null); // 'new_doc', 'add_col', or 'remove_col'
     const [confirmationMessage, setConfirmationMessage] = useState('');
 
-    // State for Add Column specific fields
+    // State for Add/Remove Column specific fields
     const [newColName, setNewColName] = useState('');
     const [isNewColEnum, setIsNewColEnum] = useState(false);
     const [newColOptionsText, setNewColOptionsText] = useState('');
+    const [colToRemove, setColToRemove] = useState('');
+
+    // --- History Management ---
+
+    /**
+     * Commits the current state (data, headers, enums) to the history stack.
+     */
+    const commitState = useCallback((newData, newHeaders, newEnums) => {
+        setHistory(prevHistory => {
+            const newPast = [...prevHistory.past, { data: data, headers: headers, enumColumns: enumColumns }];
+            return {
+                past: newPast,
+                future: [], // Clear future on new commit
+            };
+        });
+        setData(newData);
+        setHeaders(newHeaders);
+        setEnumColumns(newEnums);
+
+        // Also save the schema since it might have changed
+        saveSchema(newHeaders, newEnums);
+    }, [data, headers, enumColumns]); // Dependencies must be current state variables
+
+    /**
+     * Sets the state from a history object (undo/redo).
+     */
+    const setStateFromHistory = useCallback((historyState) => {
+        setData(historyState.data);
+        setHeaders(historyState.headers);
+        setEnumColumns(historyState.enumColumns);
+        saveSchema(historyState.headers, historyState.enumColumns); // Save schema on restore
+    }, []);
+
+    const undo = useCallback(() => {
+        if (history.past.length === 0) return;
+
+        const newPast = [...history.past];
+        const stateToUndo = newPast.pop();
+
+        setHistory(prevHistory => ({
+            past: newPast,
+            future: [{ data, headers, enumColumns }, ...prevHistory.future]
+        }));
+
+        setStateFromHistory(stateToUndo);
+    }, [history, data, headers, enumColumns, setStateFromHistory]);
+
+    const redo = useCallback(() => {
+        if (history.future.length === 0) return;
+
+        const [stateToRedo, ...newFuture] = history.future;
+
+        setHistory(prevHistory => ({
+            past: [...prevHistory.past, { data, headers, enumColumns }],
+            future: newFuture
+        }));
+
+        setStateFromHistory(stateToRedo);
+    }, [history, data, headers, enumColumns, setStateFromHistory]);
 
 
     // --- IndexedDB Saves ---
@@ -359,7 +426,6 @@ const App = () => {
             try {
                 // Determine the final set of headers
                 const fileOrSavedHeaders = initialDataResult.headers;
-                // Combine file headers with persistent custom headers (ensuring uniqueness)
                 const finalHeadersSet = new Set([...fileOrSavedHeaders, ...persistentHeaders]);
                 const finalHeaders = Array.from(finalHeadersSet);
 
@@ -368,7 +434,7 @@ const App = () => {
 
                 // Ensure all rows have all headers (add empty string for new columns)
                 const dataWithCompleteHeaders = initialDataResult.data.map((row, i) => {
-                    const newRow = { ...row, __id: row.__id || Date.now() + i };
+                    const newRow = { ...row, __id: row.__id || Date.now() + i + Math.random() };
                     finalHeaders.forEach(h => {
                         if (newRow[h] === undefined) newRow[h] = '';
                     });
@@ -380,7 +446,10 @@ const App = () => {
                 setEnumColumns(finalEnums);
                 setLoadingMessage(null);
 
-                // Save the (potentially updated) schema on first load (e.g., if new file added new static columns)
+                // Set the initial state as the first item in the history (not committed, just current)
+                setHistory({ past: [], future: [] });
+
+                // Save the (potentially updated) schema on first load
                 saveSchema(finalHeaders, finalEnums);
 
             } catch (error) {
@@ -403,37 +472,40 @@ const App = () => {
 
     // --- Core Handlers ---
 
-    const handleEdit = useCallback((rowId, colName, newValue) => {
+    const handleEdit = useCallback((rowId, colName, newValue, shouldCommit) => {
         const trimmedValue = newValue.trim();
         let schemaChanged = false;
+        let newEnums = enumColumns;
 
-        setData(prevData => {
-            const newData = prevData.map(row => {
-                if (row.__id === rowId) {
-                    return { ...row, [colName]: trimmedValue };
-                }
-                return row;
-            });
-
-            // Check if we need to update enum options (only if it's currently defined as an enum)
-            if (enumColumns[colName]?.isEnum && trimmedValue !== '' && !enumColumns[colName].options.has(trimmedValue)) {
-                setEnumColumns(prevEnums => {
-                    const newEnums = { ...prevEnums };
-                    const newOptions = new Set(newEnums[colName].options);
-                    newOptions.add(trimmedValue);
-                    newEnums[colName] = { ...newEnums[colName], options: newOptions };
-                    schemaChanged = true;
-                    return newEnums;
-                });
+        // 1. Update data locally
+        const newData = data.map(row => {
+            if (row.__id === rowId) {
+                return { ...row, [colName]: trimmedValue };
             }
-
-            if (schemaChanged) {
-                // Trigger schema save since enum options were updated
-                saveSchema(headers, enumColumns);
-            }
-            return newData;
+            return row;
         });
-    }, [enumColumns, headers, saveSchema]);
+
+        // 2. Check if we need to update enum options
+        if (enumColumns[colName]?.isEnum && trimmedValue !== '' && !enumColumns[colName].options.has(trimmedValue)) {
+            newEnums = { ...enumColumns };
+            const newOptions = new Set(newEnums[colName].options);
+            newOptions.add(trimmedValue);
+            newEnums[colName] = { ...newEnums[colName], options: newOptions };
+            schemaChanged = true;
+        }
+
+        // 3. Update state (temporarily or commit)
+        if (shouldCommit) {
+            // Commit to history and update state
+            commitState(newData, headers, newEnums);
+        } else {
+            // Just update state for immediate rendering (for non-blur events)
+            setData(newData);
+            if (schemaChanged) {
+                setEnumColumns(newEnums);
+            }
+        }
+    }, [data, headers, enumColumns, commitState]);
 
     const exportData = useCallback(() => {
         const csvContent = toCSV(data, headers);
@@ -475,20 +547,16 @@ const App = () => {
 
                     // Ensure all rows have the full set of headers
                     const dataWithCompleteHeaders = result.data.map((row, i) => {
-                        const newRow = { ...row, __id: i + 1 };
+                        const newRow = { ...row, __id: i + 1 + Math.random() };
                         finalHeaders.forEach(h => {
                             if (newRow[h] === undefined) newRow[h] = '';
                         });
                         return newRow;
                     });
 
-                    setHeaders(finalHeaders);
-                    setData(dataWithCompleteHeaders);
-                    setEnumColumns(finalEnums);
+                    // Commit the new file load as a history action
+                    commitState(dataWithCompleteHeaders, finalHeaders, finalEnums);
                     setLoadingMessage(null);
-
-                    // Save the schema (new headers) immediately
-                    saveSchema(finalHeaders, finalEnums);
 
                 } catch (error) {
                     setLoadingMessage('Error reading file. Check console for details.');
@@ -497,16 +565,16 @@ const App = () => {
             };
             reader.readAsText(file);
         }
-    }, [saveSchema]);
+    }, [commitState]);
 
 
-    // --- New Document / Add Column Modals ---
+    // --- Add/Remove Column Modal Logic ---
 
-    const openConfirmationModal = (action) => {
+    const openConfirmationModal = (action, columnName = '') => {
         setConfirmationAction(action);
         if (action === 'new_doc') {
             setConfirmationMessage(
-                "Are you sure you want to start a new document? All current edits will be cleared. We recommend exporting your work first."
+                "Are you sure you want to start a new document? All current data will be cleared, but your custom schema (headers/options) will be kept. We recommend exporting your work first."
             );
             setNewColName('');
         } else if (action === 'add_col') {
@@ -514,57 +582,70 @@ const App = () => {
             setNewColName('');
             setIsNewColEnum(false);
             setNewColOptionsText('');
+        } else if (action === 'remove_col') {
+            setColToRemove(columnName);
+            setConfirmationMessage(`WARNING: Are you sure you want to permanently remove the column '${columnName}'? All data in this column will be deleted. This action can be UNDONE.`);
         }
         setIsConfirmationModalOpen(true);
     };
 
     const confirmAction = useCallback(() => {
+        setIsConfirmationModalOpen(false);
+
         if (confirmationAction === 'new_doc') {
-            // Clear current data, but keep schema
-            setData([]);
-            setLoadingMessage(null);
+            // Commit clearing current data
+            commitState([], headers, enumColumns);
         } else if (confirmationAction === 'add_col') {
             const trimmedColName = newColName.trim();
             if (trimmedColName && !headers.includes(trimmedColName)) {
 
                 const updatedHeaders = [...headers, trimmedColName];
-
-                // Update data: add the new column with empty values
                 const updatedData = data.map(row => ({ ...row, [trimmedColName]: '' }));
 
-                // Prepare options set
                 const newOptions = isNewColEnum
                     ? new Set(newColOptionsText.split('\n').map(line => line.trim()).filter(line => line !== ''))
                     : new Set();
 
-                // Update Enums
                 const updatedEnums = {
                     ...enumColumns,
                     [trimmedColName]: { isEnum: isNewColEnum, options: newOptions }
                 };
 
-                setHeaders(updatedHeaders);
-                setData(updatedData);
-                setEnumColumns(updatedEnums);
-
-                // Save the updated schema immediately
-                saveSchema(updatedHeaders, updatedEnums);
+                // Commit adding column
+                commitState(updatedData, updatedHeaders, updatedEnums);
             }
+        } else if (confirmationAction === 'remove_col') {
+            if (!colToRemove) return;
+
+            const updatedHeaders = headers.filter(h => h !== colToRemove);
+
+            const updatedData = data.map(row => {
+                const { [colToRemove]: _, ...rest } = row;
+                return rest;
+            });
+
+            const updatedEnums = { ...enumColumns };
+            delete updatedEnums[colToRemove];
+
+            // Commit removing column
+            commitState(updatedData, updatedHeaders, updatedEnums);
         }
-        // Always close modal and clear add column state after attempt
-        setIsConfirmationModalOpen(false);
+
+        // Clear temp state
         setNewColName('');
         setIsNewColEnum(false);
         setNewColOptionsText('');
-    }, [confirmationAction, newColName, isNewColEnum, newColOptionsText, headers, data, enumColumns, saveSchema]);
+        setColToRemove('');
+    }, [confirmationAction, newColName, isNewColEnum, newColOptionsText, colToRemove, headers, data, enumColumns, commitState]);
 
     // Helper to sync schema state after option management
     useEffect(() => {
         if (isOptionModalOpen === false && modalColumn !== null) {
-            // Only trigger save if we were managing options and the state has settled
-            saveSchema(headers, enumColumns);
+            // After options modal closes, commit the change to history
+            commitState(data, headers, enumColumns);
+            setModalColumn(null); // Clear to prevent repeated saving
         }
-    }, [isOptionModalOpen, modalColumn, headers, enumColumns, saveSchema]);
+    }, [isOptionModalOpen, modalColumn, data, headers, enumColumns, commitState]);
 
 
     // --- Option Management Modal Logic ---
@@ -600,7 +681,7 @@ const App = () => {
             .map(line => line.trim())
             .filter(line => line !== '');
 
-        // Update global state
+        // Update global state, then let useEffect trigger the commit
         setEnumColumns(prevEnums => ({
             ...prevEnums,
             [modalColumn]: {
@@ -610,19 +691,20 @@ const App = () => {
         }));
 
         setIsOptionModalOpen(false);
-        // Schema save is handled by the useEffect hook after the modal closes
     };
 
-
-    // --- Modal Markup ---
-    const confirmationModal = (
+    // --- Modal Markup (Combined for simplicity) ---
+    const columnModificationModal = (
         <div className={isConfirmationModalOpen ? "fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-75" : "hidden"}>
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 m-4">
                 <h2 className="text-xl font-bold mb-4">
-                    {confirmationAction === 'new_doc' ? 'Confirm New Document' : 'Add New Column'}
+                    {confirmationAction === 'new_doc' && 'Confirm New Document'}
+                    {confirmationAction === 'add_col' && 'Add New Column'}
+                    {confirmationAction === 'remove_col' && 'Confirm Column Deletion'}
                 </h2>
-                <p className="text-gray-700 mb-4">{confirmationMessage}</p>
+                <p className="text-gray-700 mb-4 font-medium">{confirmationMessage}</p>
 
+                {/* Add Column Fields */}
                 {confirmationAction === 'add_col' && (
                     <div className="space-y-4">
                         <input
@@ -667,6 +749,24 @@ const App = () => {
                     </div>
                 )}
 
+                {/* Remove Column Selection Field */}
+                {confirmationAction === 'remove_col' && (
+                    <div className="space-y-4">
+                        <label htmlFor="col-remove-select" className="block text-sm font-medium text-gray-700 mb-1">Column to Remove:</label>
+                        <select
+                            id="col-remove-select"
+                            className="editable-select text-sm"
+                            value={colToRemove}
+                            onChange={(e) => setColToRemove(e.target.value)}
+                        >
+                            <option value="" disabled>-- Select a Column --</option>
+                            {headers.map(h => (
+                                <option key={h} value={h}>{h}</option>
+                            ))}
+                        </select>
+                    </div>
+                )}
+
                 <div className="flex justify-end space-x-3 mt-6">
                     {confirmationAction === 'new_doc' && (
                         <button
@@ -682,9 +782,14 @@ const App = () => {
                     </button>
                     <button
                         onClick={confirmAction}
-                        disabled={confirmationAction === 'add_col' && (!newColName.trim() || headers.includes(newColName.trim()))}
-                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-3 rounded-lg text-sm shadow-md transition duration-150 disabled:opacity-50">
-                        {confirmationAction === 'new_doc' ? 'Yes, Clear Data' : 'Add Column'}
+                        disabled={
+                            (confirmationAction === 'add_col' && (!newColName.trim() || headers.includes(newColName.trim()))) ||
+                            (confirmationAction === 'remove_col' && !colToRemove)
+                        }
+                        className={`font-semibold py-2 px-3 rounded-lg text-sm shadow-md transition duration-150 disabled:opacity-50 ${
+                            confirmationAction === 'remove_col' ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                        }`}>
+                        {confirmationAction === 'new_doc' ? 'Yes, Clear Data' : confirmationAction === 'add_col' ? 'Add Column' : 'Remove Column'}
                     </button>
                 </div>
             </div>
@@ -750,10 +855,27 @@ const App = () => {
                 <h1 className="text-3xl font-extrabold text-gray-900 mb-2">CSV Annotation Editor</h1>
                 <p className="text-gray-600 mb-4">
                     Edit annotations in the table below. The schema (headers and dropdown options) are saved automatically and carry over to new documents.
-                    <span className="font-semibold text-indigo-500">Your document edits are auto-saved locally.</span>
+                    <span className="font-semibold text-indigo-500">All changes are auto-saved and trackable with Undo/Redo.</span>
                 </p>
 
                 <div className="flex flex-wrap gap-3 items-center">
+                    {/* History Controls */}
+                    <button
+                        onClick={undo}
+                        disabled={history.past.length === 0}
+                        title="Undo Last Action (Ctrl+Z)"
+                        className="flex-shrink-0 bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 disabled:opacity-30">
+                        Undo ({history.past.length})
+                    </button>
+                    <button
+                        onClick={redo}
+                        disabled={history.future.length === 0}
+                        title="Redo Last Undo (Ctrl+Y)"
+                        className="flex-shrink-0 bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 disabled:opacity-30">
+                        Redo ({history.future.length})
+                    </button>
+
+                    {/* Document Controls */}
                     <button
                         onClick={() => openConfirmationModal('new_doc')}
                         className="flex-shrink-0 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
@@ -764,16 +886,6 @@ const App = () => {
                         className="flex-shrink-0 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
                         Export to CSV
                     </button>
-                    <button
-                        onClick={() => openConfirmationModal('add_col')}
-                        className="flex-shrink-0 bg-yellow-600 hover:bg-yellow-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
-                        Add New Column
-                    </button>
-                    <button
-                        onClick={openOptionModal}
-                        className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
-                        Manage Options
-                    </button>
                     <input
                         type="file"
                         id="file-input"
@@ -781,6 +893,26 @@ const App = () => {
                         onChange={handleFileLoad}
                         className="flex-grow max-w-xs text-sm text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-indigo-700 hover:file:bg-violet-100"
                     />
+                </div>
+
+                {/* Schema Controls */}
+                <div className="flex flex-wrap gap-3 items-center mt-4 border-t pt-4">
+                    <button
+                        onClick={() => openConfirmationModal('add_col')}
+                        className="flex-shrink-0 bg-yellow-600 hover:bg-yellow-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                        Add New Column
+                    </button>
+                    <button
+                        onClick={() => openConfirmationModal('remove_col', headers.length > 0 ? headers[0] : '')}
+                        disabled={headers.length === 0}
+                        className="flex-shrink-0 bg-pink-600 hover:bg-pink-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 disabled:opacity-30">
+                        Remove Column
+                    </button>
+                    <button
+                        onClick={openOptionModal}
+                        className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                        Manage Options
+                    </button>
                 </div>
             </div>
 
@@ -831,7 +963,7 @@ const App = () => {
             </div>
 
             {optionManagementModal}
-            {confirmationModal}
+            {columnModificationModal}
         </div>
     )
 }
