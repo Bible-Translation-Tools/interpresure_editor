@@ -35,6 +35,7 @@ jobs:
         with:
           # Builds the macOS app (.app and .dmg)
           tagName: ${{ github.ref_name }}
+          releaseName: 'App Release ${{ github.ref_name }}'
           args: --target universal-apple-darwin
 
   # --------------------------------------------------------------------------------------------------
@@ -68,6 +69,7 @@ jobs:
         with:
           # Builds the Windows app (.msi installer)
           tagName: ${{ github.ref_name }}
+          releaseName: 'App Release ${{ github.ref_name }}'
           args: --target x86_64-pc-windows-msvc
           # Note: Code signing for Windows requires additional secrets setup
 
@@ -78,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     # Linux builds require extra dependencies for AppImage creation
     container:
-      image: ghcr.io/tauri-apps/tauri-action:rust-1.78.0
+      image: ivangabriele/tauri:debian-bullseye-20
     steps:
       - uses: actions/checkout@v4
       - name: Install pnpm
@@ -100,4 +102,5 @@ jobs:
         with:
           # Builds the Linux app (usually .AppImage)
           tagName: ${{ github.ref_name }}
+          releaseName: 'App Release ${{ github.ref_name }}'
           args: --target x86_64-unknown-linux-gnu
