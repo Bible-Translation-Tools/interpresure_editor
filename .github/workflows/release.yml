@@ -17,6 +17,9 @@ jobs:
         with:
           node-version: '20'
           cache: 'pnpm'
+      - name: Install pnpm
+        run: npm install -g pnpm
+
       - name: Install dependencies
         run: pnpm install
       - name: Install Rust toolchain
@@ -43,6 +46,8 @@ jobs:
         with:
           node-version: '20'
           cache: 'pnpm'
+      - name: Install pnpm
+        run: npm install -g pnpm
       - name: Install dependencies
         run: pnpm install
       - name: Install Rust toolchain
@@ -75,6 +80,8 @@ jobs:
         with:
           node-version: '20'
           cache: 'pnpm'
+      - name: Install pnpm
+        run: npm install -g pnpm
       - name: Install dependencies
         run: pnpm install
 
