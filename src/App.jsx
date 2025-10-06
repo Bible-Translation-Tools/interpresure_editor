@@ -1,15 +1,24 @@
 // --- 1. CONFIGURATION AND INITIAL DATA ---
 import React from "react";
 
+// --- 0. CONFIGURATION & INDEXEDDB UTILITIES ---
 
-// --- 0. INDEXEDDB UTILITIES ---
 const IDB_NAME = 'CSVEditorDB';
-const IDB_VERSION = 1;
+const IDB_VERSION = 2;
 const IDB_STORE_NAME = 'csv_data_store';
-const DATA_KEY = 'current_csv_data';
+const DATA_KEY = 'current_csv_data'; // The current table content (transient)
+const SCHEMA_KEY = 'persistent_csv_schema'; // Headers and Enum options (persistent)
+
+// Static list of columns that must be treated as Enums
+const STATIC_ENUM_COLUMNS = [
+    "IllocutionaryForce", "Modality", "Stance", "Evidentiality", "Veridicality",
+    "EntailmentPattern", "InferenceType", "IsCancelled", "Code", "PresuppositionType",
+    "ImplicatureType", "IsScalar", "ScaleType", "IsExhausted", "PredicationType",
+    "Information_Structure"
+];
 
 /**
- * Opens the IndexedDB database, creating the object store if necessary.
+ * Opens the IndexedDB database.
  */
 const openDB = () => {
     return new Promise((resolve, reject) => {
@@ -34,89 +43,93 @@ const openDB = () => {
 };
 
 /**
- * Saves the current data and headers to IndexedDB.
+ * Saves a generic object to IndexedDB under a specific key.
  */
-const saveData = async (dataToSave) => {
+const saveToDB = async (key, dataToSave) => {
     try {
         const db = await openDB();
         const transaction = db.transaction([IDB_STORE_NAME], 'readwrite');
         const store = transaction.objectStore(IDB_STORE_NAME);
 
-        const saveObject = {
-            data: dataToSave.data,
-            headers: dataToSave.headers,
-            enumColumns: dataToSave.enumColumns, // Save enum columns for consistency
-            timestamp: new Date().toISOString()
-        };
+        // Convert Sets to Arrays for storage compatibility when saving schema
+        if (key === SCHEMA_KEY && dataToSave.enumColumns) {
+            const serializableEnums = {};
+            for (const col in dataToSave.enumColumns) {
+                serializableEnums[col] = {
+                    isEnum: dataToSave.enumColumns[col].isEnum,
+                    options: Array.from(dataToSave.enumColumns[col].options)
+                };
+            }
+            dataToSave = { ...dataToSave, enumColumns: serializableEnums };
+        }
 
-        const request = store.put(saveObject, DATA_KEY);
+        const request = store.put(dataToSave, key);
 
         return new Promise((resolve, reject) => {
             request.onsuccess = () => resolve();
             request.onerror = (event) => {
-                console.error("Save failed:", event.target.error);
+                console.error(`Save failed for ${key}:`, event.target.error);
                 reject(event.target.error);
             };
         });
 
     } catch (error) {
-        console.error("Could not save data to IndexedDB:", error);
+        console.error(`Could not save data for ${key} to IndexedDB:`, error);
     }
 };
 
 /**
- * Loads the saved data from IndexedDB.
+ * Loads a generic object from IndexedDB by key.
  */
-const loadData = async () => {
+const loadFromDB = async (key) => {
     try {
         const db = await openDB();
         const transaction = db.transaction([IDB_STORE_NAME], 'readonly');
         const store = transaction.objectStore(IDB_STORE_NAME);
-        const request = store.get(DATA_KEY);
+        const request = store.get(key);
 
         return new Promise((resolve, reject) => {
             request.onsuccess = (event) => {
-                resolve(event.target.result);
+                let result = event.target.result;
+
+                // Convert Arrays back to Sets for use in React state when loading schema
+                if (key === SCHEMA_KEY && result && result.enumColumns) {
+                    const deserializedEnums = {};
+                    for (const col in result.enumColumns) {
+                        deserializedEnums[col] = {
+                            isEnum: result.enumColumns[col].isEnum,
+                            options: new Set(result.enumColumns[col].options)
+                        };
+                    }
+                    result = { ...result, enumColumns: deserializedEnums };
+                }
+                resolve(result);
             };
             request.onerror = (event) => {
-                console.error("Load failed:", event.target.error);
+                console.error(`Load failed for ${key}:`, event.target.error);
                 reject(event.target.error);
             };
         });
 
     } catch (error) {
-        console.error("Could not load data from IndexedDB:", error);
+        console.error(`Could not load data for ${key} from IndexedDB:`, error);
         return null;
     }
 };
 
 
-// --- 1. CONFIGURATION AND INITIAL DATA ---
-const ENUM_THRESHOLD = 4; // Columns with <= 4 unique values are considered enums
-
-// CSV data pre-loaded from the user's file snippet
+// --- 1. DEFAULT CSV DATA ---
 const RAW_CSV_DATA = `ID,Book,Chapter,Verse,TokenID,GreekText,IllocutionaryForce,Modality,Stance,Evidentiality,Face,Veridicality,EntailmentPattern,InferenceType,IsCancelled,Code,Prejacent,PresuppositionType,ImplicatureType,InvitedInference,IsScalar,ScaleType,Alternative,IsExhausted,PredicationType,Question-Under-Discussion,InferredProposition,Information_Structure,Notes,,,
 ,Philemon,1,1,"57001001-01, 57001001-02, 57001001-03, 57001001-04",ΠΑΥΛΟΣ ΔΕΣΜΙΟΣ ΧΡΙΣΤΟΥ ΙΗΣΟΥ,N/A,Realis,Identity,N/A,N/A,Veridical,N/A,Implicature,FALSE,DefiniteDescription,"Paul is in prison because of Jesus",N/A,Particularized Conversational,N/A,FALSE,N/A,N/A,N/A,"Appositive predication, Defining","Global implicit QUD: What should Philemon do about Onesimus?","Paul is like Onesimus because he also has a master.",,"Choice of description is marked. Paul is presequencing to prepare for a latter, potentially face-threatening act. Paul explicitly honors Philemon and implicitly positions him as aligned with Paul’s mission and values. Paul anticipates that Philemon will behave accordingly when asked (especially in v. 8–10ff). Affiliative presequencing: Paul’s identifier is that he is a slave of Jesus Christ, no other identifier. Jesus is a master to Paul, but he...",,,
 ,Philemon,1,12,"570010120010, 570010120020, 570010120030, 570010120040",ΟΝ ΗΓΑΠΗΜΕΝΕ,N/A,N/A,Attitudinal,N/A,N/A,N/A,N/A,N/A,FALSE,Interjection,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,"Paul is using an affective address: he is feeling a lack of love from his church in Rome.",N/A,N/A,"Paul is presequencing, trying to mitigate the face threat inherent in asking Philemon to do something. He emphasizes his deep affection for him. There is a sense of 'If you love me, then you will do this thing.'",,,
 ,Philemon,1,17,"570010170010, 570010170020, 570010170030, 570010170040",ΕΙ ΟΥΝ ΜΕ ΕΧΕΙΣ ΚΟΙΝΩΝΟΝ,N/A,Hypothetical,N/A,N/A,N/A,Veridical,N/A,N/A,FALSE,Conjunction,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,"QUD: Does Paul have the right to request this action?","Paul is appealing to Philemon's prior relationship/commitment to Paul to justify the request.",,"The conditional is of the 'If X then Y' type, where X is taken to be true. Paul is using the first part as a premise for the second part (v. 17b). This acts as a presequencing element.",,,
-,Philemon,1,21,"570010210010, 570010210020, 570010210030, 570010210040, 570010210050, 570010210060, 570010210070, 570010210080, 570010210090, 570010210100, 570010210110, 570010210120010, 570010210130010, 570010210140010",ΠΕΠΟΙΘΩΣ ΤΗ ΥΠΑΚΟΗ ΣΟΥ ΕΓΡΑΨΑ ΣΟΙ ΕΙΔΩΣ ΟΤΙ ΚΑΙ ΥΠΕΡ Ο ΖΗΤΩ ΠΟΙΗΣΕΙΣ,N/A,Realis,Epistemic,Attitudinal,N/A,Veridical,N/A,N/A,FALSE,Verb,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"Attitude report is used as a hedge (Paul is not asking something unreasonable, given the character of Philemon). Character sequencing reaches a crescendo. Paul expects more than the baseline. Will Philemon live up to his reputation?",,,
-,Philemon,1,22,"570010220010010, 570010220020010",ΑΜΑ ΔΕ ΚΑΙ,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,FALSE,Verb,N/A,N/A,N/A,N/A,TRUE,N/A,N/A,FALSE,N/A,,Paul is adding this directive to the previous sequence of directives: receive and refresh,,,,
-,Philemon,1,22,"570010220030010, 570010220040010, 570010220050010",ΕΤΟΙΜΑΖΕ ΜΟΙ ΞΕΝΙΑΝ,N/A,Directive,N/A,N/A,N/A,N/A,N/A,N/A,FALSE,Verb,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,"QUD: Should Philemon prepare a guest room for Paul?","Paul is directing Philemon to prepare a guest room for him.",,"This is a command, and is a pre-sequence (Paul is anticipating his arrival).",,,
-,Philemon,1,23,570010230010,ΕΠΑΦΡΑΣ,N/A,N/A,Identity,N/A,N/A,N/A,N/A,N/A,FALSE,Noun,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"This serves to introduce Epaphras to Philemon, and it serves an affiliative function.",,,
-,Philemon,1,23,570010230020,Ο ΣΥΝΑΙΧΜΑΛΩΤΟΣ,N/A,Realis,Identity,N/A,N/A,Veridical,N/A,N/A,FALSE,DefiniteDescription,Epaphras is a fellow prisoner,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,"Appositive predication, Defining",Global implicit QUD: Who is Epaphras?,Epaphras is a fellow worker.,,"The appositive phrase is marked, as it emphasizes the strong commitment of Epaphras to the gospel, and it serves an affiliative function.",,,
-,Philemon,1,24,570010240010,ΜΑΡΚΟΣ,N/A,N/A,Identity,N/A,N/A,N/A,N/A,N/A,FALSE,Noun,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"This serves to introduce Mark to Philemon, and it serves an affiliative function.",,,
-,Philemon,1,24,570010240020,ΑΡΙΣΤΑΡΧΟΣ,N/A,N/A,Identity,N/A,N/A,N/A,N/A,N/A,FALSE,Noun,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"This serves to introduce Aristarchus to Philemon, and it serves an affiliative function.",,,
-,Philemon,1,24,570010240030,ΔΗΜΑΣ,N/A,N/A,Identity,N/A,N/A,N/A,N/A,N/A,FALSE,Noun,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"This serves to introduce Demas to Philemon, and it serves an affiliative function.",,,
-,Philemon,1,24,570010240040,ΛΟΥΚΑΣ,N/A,N/A,Identity,N/A,N/A,N/A,N/A,N/A,FALSE,Noun,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"This serves to introduce Luke to Philemon, and it serves an affiliative function.",,,
-,Philemon,1,24,"570010240050, 570010240060",ΟΙ ΣΥΝΕΡΓΟΙ ΜΟΥ,N/A,Realis,Identity,N/A,N/A,Veridical,N/A,N/A,FALSE,DefiniteDescription,They are Paul's fellow workers,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,"Appositive predication, Defining",Global implicit QUD: Who are these men?,They are Paul's fellow workers.,,"The appositive phrase is marked, as it emphasizes the strong commitment of these men to the gospel, and it serves an affiliative function.",,,
-,Philemon,1,25,"570010250010, 570010250020, 570010250030, 570010250040, 570010250050",Η ΧΑΡΙΣ ΤΟΥ ΚΥΡΙΟΥ ΙΗΣΟΥ ΧΡΙΣΤΟΥ,N/A,Realis,Identity,N/A,N/A,Veridical,N/A,N/A,FALSE,Noun,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"Final closing formula. Paul is making a final wish for Philemon. Affiliative closing formula: Paul is blessing Philemon with the grace of the Lord Jesus Christ.",,,
+,Philemon,1,21,"570010210010, 570010210020, 570010210030, 570010210040, 570010210100, 570010210110, 570010210120010, 570010210130010, 570010210140010",ΠΕΠΟΙΘΩΣ ΤΗ ΥΠΑΚΟΗ ΣΟΥ ΕΓΡΑΨΑ ΣΟΙ ΕΙΔΩΣ ΟΤΙ ΚΑΙ ΥΠΕΡ Ο ΖΗΤΩ ΠΟΙΗΣΕΙΣ,N/A,Realis,Epistemic,Attitudinal,N/A,Veridical,N/A,N/A,FALSE,Verb,N/A,N/A,N/A,N/A,FALSE,N/A,N/A,N/A,N/A,,N/A,,"Attitude report is used as a hedge (Paul is not asking something unreasonable, given the character of Philemon). Character sequencing reaches a crescendo. Paul expects more than the baseline. Will Philemon live up to his reputation?",,,
 `;
 
 // --- 2. CSV UTILITIES (Pure Functions) ---
 
 /**
  * Parses a CSV string into an array of objects.
- * Handles quoted fields and multi-line content (simplified for reliable parsing in this environment).
  * Assigns a unique ID (__id) to each row.
  */
 const parseCSV = (csv) => {
@@ -151,8 +164,7 @@ const parseCSV = (csv) => {
                 rowObject[headers[index]] = value;
             }
         });
-        // Assign a unique ID for tracking edits
-        rowObject.__id = i;
+        rowObject.__id = Date.now() + i; // Use timestamp + index for unique ID
         data.push(rowObject);
     }
 
@@ -166,7 +178,6 @@ const toCSV = (data, headers) => {
     const escapeValue = (value) => {
         if (value === null || value === undefined) return '';
         let str = String(value);
-        // If the string contains comma, quote, or newline, wrap it in double quotes and escape internal quotes
         if (str.includes(',') || str.includes('"') || str.includes('\n')) {
             return `"${str.replace(/"/g, '""')}"`;
         }
@@ -174,12 +185,9 @@ const toCSV = (data, headers) => {
     };
 
     const csvRows = [];
-    // 1. Header Row
     csvRows.push(headers.map(escapeValue).join(','));
 
-    // 2. Data Rows
     data.forEach(row => {
-        // Exclude the internal __id property when generating CSV
         const values = headers.map(header => escapeValue(row[header]));
         csvRows.push(values.join(','));
     });
@@ -187,37 +195,70 @@ const toCSV = (data, headers) => {
     return csvRows.join('\n');
 };
 
+/**
+ * Generates initial enum structure from headers and data, focusing on STATIC_ENUM_COLUMNS
+ * and persistent schema options.
+ */
+const initializeEnumColumns = (currentHeaders, currentData, existingSchema = {}) => {
+    const newEnumColumns = {};
+    const enumSet = new Set(STATIC_ENUM_COLUMNS);
+
+    currentHeaders.forEach(header => {
+        const isStaticEnum = enumSet.has(header);
+        const isPersistedEnum = existingSchema[header]?.isEnum;
+
+        // Determine if it should be an enum
+        const shouldBeEnum = isStaticEnum || isPersistedEnum;
+
+        if (shouldBeEnum) {
+            let optionsSet = new Set();
+
+            // 1. Load existing options from persisted schema if available
+            if (existingSchema[header] && existingSchema[header].options) {
+                optionsSet = existingSchema[header].options;
+            }
+
+            // 2. Add options from the current document data (useful if the doc is newly loaded)
+            currentData.forEach(row => {
+                const value = row[header];
+                if (value !== undefined && value !== null && String(value).trim() !== '') {
+                    optionsSet.add(String(value).trim());
+                }
+            });
+
+            newEnumColumns[header] = {
+                isEnum: true,
+                options: optionsSet
+            };
+        } else {
+            // Default to non-enum (text input)
+            newEnumColumns[header] = { isEnum: false, options: new Set() };
+        }
+    });
+
+    return newEnumColumns;
+};
+
 
 // --- 3. REACT COMPONENTS ---
+const { useState, useEffect, useCallback, useMemo } = React;
 
 // Component for rendering a single cell
 const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, handleEdit }) => {
     const colOptions = enumOptions[colName];
-
-    // Determine if the value requires a textarea (for long text)
     const isLongText = value && (value.length > 50 || value.includes('\n'));
     const rows = isLongText ? Math.max(3, Math.ceil(value.length / 50)) : undefined;
 
-    // Handler for text input/textarea blur event
-    const handleBlur = (e) => {
-        handleEdit(rowId, colName, e.target.value);
-    };
+    const handleBlur = (e) => handleEdit(rowId, colName, e.target.value);
+    const handleChange = (e) => handleEdit(rowId, colName, e.target.value);
 
-    // Handler for select change event
-    const handleChange = (e) => {
-        handleEdit(rowId, colName, e.target.value);
-    };
-
-    const inputClasses = "editable-cell p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full";
-    const selectClasses = "editable-select p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full bg-white";
+    const inputClasses = "editable-cell p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full text-sm";
+    const selectClasses = "editable-select p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full bg-white text-sm";
 
     if (isEnum && colOptions) {
-        // Dropdown rendering for Enum columns
-        const optionsSet = colOptions.options;
-        let currentOptions = Array.from(optionsSet).sort();
-
-        // Ensure the current value is always an option
-        if (value && !optionsSet.has(value)) {
+        let currentOptions = Array.from(colOptions.options).sort();
+        if (value && !colOptions.options.has(value)) {
+            // Ensure the current value is always available in the dropdown
             currentOptions = [value, ...currentOptions];
         }
 
@@ -227,7 +268,6 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
                 value={value || ''}
                 onChange={handleChange}
             >
-                {/* Allow empty string selection for clearing the cell */}
                 <option value="">(None)</option>
                 {currentOptions.map((optionText, index) => (
                     <option key={index} value={optionText}>
@@ -238,7 +278,6 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
         );
     }
 
-    // Text input or Textarea for non-Enum columns
     if (isLongText) {
         return (
             <textarea
@@ -246,7 +285,7 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
                 rows={rows}
                 value={value || ''}
                 onBlur={handleBlur}
-                onChange={(e) => handleEdit(rowId, colName, e.target.value, false)} // Immediate update for textareas is better UX
+                onChange={(e) => handleEdit(rowId, colName, e.target.value, false)}
             />
         );
     }
@@ -257,13 +296,10 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
             className={inputClasses}
             value={value || ''}
             onBlur={handleBlur}
-            onChange={(e) => handleEdit(rowId, colName, e.target.value, false)} // Immediate update for inputs
+            onChange={(e) => handleEdit(rowId, colName, e.target.value, false)}
         />
     );
 });
-
-// Use React.useState, etc. which are available globally via the CDN scripts
-const { useState, useEffect, useCallback, useMemo } = React;
 
 
 // Main Application Component
@@ -271,82 +307,82 @@ const App = () => {
     const [data, setData] = useState([]);
     const [headers, setHeaders] = useState([]);
     const [enumColumns, setEnumColumns] = useState({});
-    const [loadingMessage, setLoadingMessage] = useState('Loading data...');
+    const [loadingMessage, setLoadingMessage] = useState('Loading...');
 
-    const [isModalOpen, setIsModalOpen] = useState(false);
+    // Modal state for Option Management
+    const [isOptionModalOpen, setIsOptionModalOpen] = useState(false);
     const [modalColumn, setModalColumn] = useState(null);
     const [modalOptionsText, setModalOptionsText] = useState('');
-    const [modalMessage, setModalMessage] = useState('');
-    const [messageType, setMessageType] = useState('error'); // 'error' or 'success'
 
-    // --- Data Parsing and Initialization ---
+    // Modal state for Confirmation/Add Column
+    const [isConfirmationModalOpen, setIsConfirmationModalOpen] = useState(false);
+    const [confirmationAction, setConfirmationAction] = useState(null); // 'new_doc' or 'add_col'
+    const [confirmationMessage, setConfirmationMessage] = useState('');
 
-    /**
-     * Identifies enum columns and builds their initial options set.
-     */
-    const identifyEnumColumns = useCallback((currentHeaders, currentData) => {
-        const columnValues = {};
-        const newEnumColumns = {};
+    // State for Add Column specific fields
+    const [newColName, setNewColName] = useState('');
+    const [isNewColEnum, setIsNewColEnum] = useState(false);
+    const [newColOptionsText, setNewColOptionsText] = useState('');
 
-        // 1. Collect all unique values for each column
-        currentHeaders.forEach(header => {
-            columnValues[header] = new Set();
-        });
 
-        currentData.forEach(row => {
-            currentHeaders.forEach(header => {
-                const value = row[header];
-                if (value !== undefined && value !== null && String(value).trim() !== '') {
-                    columnValues[header].add(String(value).trim());
-                }
-            });
-        });
+    // --- IndexedDB Saves ---
+    const saveDocumentData = useCallback(() => {
+        saveToDB(DATA_KEY, { data, headers });
+    }, [data, headers]);
 
-        // 2. Determine enum status and build initial options
-        currentHeaders.forEach(header => {
-            const uniqueValues = Array.from(columnValues[header]);
-            const isEnum = uniqueValues.length > 0 && uniqueValues.length <= ENUM_THRESHOLD;
-
-            newEnumColumns[header] = {
-                isEnum: isEnum,
-                options: columnValues[header]
-            };
-        });
-
-        setEnumColumns(newEnumColumns);
-        return newEnumColumns;
+    const saveSchema = useCallback((currentHeaders, currentEnums) => {
+        saveToDB(SCHEMA_KEY, { headers: currentHeaders, enumColumns: currentEnums });
     }, []);
 
-    // --- EFFECT 1: Load initial data (from IndexedDB or default CSV) ---
+    // --- EFFECT 1: Initial Load ---
     useEffect(() => {
         const loadInitialData = async () => {
-            setLoadingMessage('Checking for saved data...');
-            let initialData = null;
-            let initialEnums = {};
+            setLoadingMessage('Checking for saved schema and data...');
 
-            // 1. Try loading from IndexedDB
-            const savedState = await loadData();
+            // 1. Load persistent Schema (Headers & Enum Options)
+            const savedSchema = await loadFromDB(SCHEMA_KEY);
+            const persistentHeaders = savedSchema?.headers || [];
+            const persistentEnums = savedSchema?.enumColumns || {};
 
-            if (savedState && savedState.data && savedState.headers) {
-                setLoadingMessage('Loading saved data...');
-                initialData = { data: savedState.data, headers: savedState.headers };
-                initialEnums = savedState.enumColumns || identifyEnumColumns(initialData.headers, initialData.data);
+            // 2. Load transient Document Data
+            const savedData = await loadFromDB(DATA_KEY);
+            let initialDataResult = { headers: [], data: [] };
+
+            if (savedData && savedData.data && savedData.headers) {
+                setLoadingMessage('Loading last saved document...');
+                initialDataResult = savedData;
             } else {
-                // 2. Fallback to raw hardcoded CSV
-                setLoadingMessage('No saved data found. Loading default CSV...');
-                const result = parseCSV(RAW_CSV_DATA);
-                initialData = result;
-                initialEnums = identifyEnumColumns(initialData.headers, initialData.data);
+                setLoadingMessage('No saved document found. Loading default CSV...');
+                initialDataResult = parseCSV(RAW_CSV_DATA);
             }
 
             try {
-                // Ensure IDs are present and update state
-                const dataWithIds = initialData.data.map((row, i) => ({ ...row, __id: row.__id || i + 1 }));
+                // Determine the final set of headers
+                const fileOrSavedHeaders = initialDataResult.headers;
+                // Combine file headers with persistent custom headers (ensuring uniqueness)
+                const finalHeadersSet = new Set([...fileOrSavedHeaders, ...persistentHeaders]);
+                const finalHeaders = Array.from(finalHeadersSet);
 
-                setHeaders(initialData.headers);
-                setData(dataWithIds);
-                setEnumColumns(initialEnums);
+                // Re-initialize enums based on the final headers and the persistent enum options
+                const finalEnums = initializeEnumColumns(finalHeaders, initialDataResult.data, persistentEnums);
+
+                // Ensure all rows have all headers (add empty string for new columns)
+                const dataWithCompleteHeaders = initialDataResult.data.map((row, i) => {
+                    const newRow = { ...row, __id: row.__id || Date.now() + i };
+                    finalHeaders.forEach(h => {
+                        if (newRow[h] === undefined) newRow[h] = '';
+                    });
+                    return newRow;
+                });
+
+                setHeaders(finalHeaders);
+                setData(dataWithCompleteHeaders);
+                setEnumColumns(finalEnums);
                 setLoadingMessage(null);
+
+                // Save the (potentially updated) schema on first load (e.g., if new file added new static columns)
+                saveSchema(finalHeaders, finalEnums);
+
             } catch (error) {
                 console.error("Error processing data:", error);
                 setLoadingMessage('Error processing data. Check console for details.');
@@ -354,25 +390,22 @@ const App = () => {
         };
 
         loadInitialData();
-    }, [identifyEnumColumns]);
+    }, [saveSchema]);
 
-    // --- EFFECT 2: Auto-save to IndexedDB whenever data or headers change ---
+
+    // --- EFFECT 2: Auto-save Document Data ---
     useEffect(() => {
-        // Only save if data has been loaded and initialized
         if (data.length > 0 && headers.length > 0 && loadingMessage === null) {
-            saveData({ data, headers, enumColumns });
-            // console.log("Autosaved data to IndexedDB.");
+            const timeoutId = setTimeout(saveDocumentData, 500); // Debounce save
+            return () => clearTimeout(timeoutId);
         }
-    }, [data, headers, enumColumns, loadingMessage]); // Also save when enumColumns changes
+    }, [data, saveDocumentData, headers, loadingMessage]);
 
+    // --- Core Handlers ---
 
-    // --- Data Editing and Handling ---
-
-    /**
-     * Updates the internal data structure when a cell is edited.
-     */
-    const handleEdit = useCallback((rowId, colName, newValue, checkEnum=true) => {
+    const handleEdit = useCallback((rowId, colName, newValue) => {
         const trimmedValue = newValue.trim();
+        let schemaChanged = false;
 
         setData(prevData => {
             const newData = prevData.map(row => {
@@ -382,24 +415,26 @@ const App = () => {
                 return row;
             });
 
-            // Check if we need to update enum options (only if it's an enum column and the value is new)
-            if (checkEnum && enumColumns[colName]?.isEnum && trimmedValue !== '' && !enumColumns[colName].options.has(trimmedValue)) {
+            // Check if we need to update enum options (only if it's currently defined as an enum)
+            if (enumColumns[colName]?.isEnum && trimmedValue !== '' && !enumColumns[colName].options.has(trimmedValue)) {
                 setEnumColumns(prevEnums => {
                     const newEnums = { ...prevEnums };
-                    // Clone the set before modification
                     const newOptions = new Set(newEnums[colName].options);
                     newOptions.add(trimmedValue);
                     newEnums[colName] = { ...newEnums[colName], options: newOptions };
+                    schemaChanged = true;
                     return newEnums;
                 });
             }
+
+            if (schemaChanged) {
+                // Trigger schema save since enum options were updated
+                saveSchema(headers, enumColumns);
+            }
             return newData;
         });
-    }, [enumColumns]);
+    }, [enumColumns, headers, saveSchema]);
 
-    /**
-     * Exports the current data to a downloadable CSV file.
-     */
     const exportData = useCallback(() => {
         const csvContent = toCSV(data, headers);
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -408,32 +443,53 @@ const App = () => {
 
         const date = new Date().toISOString().slice(0, 10);
         link.setAttribute('href', url);
-        link.setAttribute('download', `InterpreSure_Annotations_edited_${date}.csv`);
+        link.setAttribute('download', `CSV_Annotations_exported_${date}.csv`);
 
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
     }, [data, headers]);
 
-    /**
-     * Loads a new CSV file.
-     */
-    const handleFileLoad = useCallback((e) => {
+    const handleFileLoad = useCallback(async (e) => {
         const file = e.target.files[0];
         if (file) {
             setLoadingMessage('Loading custom file...');
+            e.target.value = null; // Reset input field to allow loading the same file again
+
+            // 1. Load persistent schema first
+            const savedSchema = await loadFromDB(SCHEMA_KEY);
+            const persistentHeaders = savedSchema?.headers || [];
+            const persistentEnums = savedSchema?.enumColumns || {};
 
             const reader = new FileReader();
             reader.onload = function(event) {
                 try {
                     const result = parseCSV(event.target.result);
-                    // Ensure fresh IDs for the new file
-                    const dataWithIds = result.data.map((row, i) => ({ ...row, __id: i + 1 }));
 
-                    setHeaders(result.headers);
-                    setData(dataWithIds);
-                    identifyEnumColumns(result.headers, dataWithIds);
+                    // Combine file headers with persistent custom headers
+                    const newHeadersSet = new Set([...result.headers, ...persistentHeaders]);
+                    const finalHeaders = Array.from(newHeadersSet);
+
+                    // Re-initialize enums structure
+                    const finalEnums = initializeEnumColumns(finalHeaders, result.data, persistentEnums);
+
+                    // Ensure all rows have the full set of headers
+                    const dataWithCompleteHeaders = result.data.map((row, i) => {
+                        const newRow = { ...row, __id: i + 1 };
+                        finalHeaders.forEach(h => {
+                            if (newRow[h] === undefined) newRow[h] = '';
+                        });
+                        return newRow;
+                    });
+
+                    setHeaders(finalHeaders);
+                    setData(dataWithCompleteHeaders);
+                    setEnumColumns(finalEnums);
                     setLoadingMessage(null);
+
+                    // Save the schema (new headers) immediately
+                    saveSchema(finalHeaders, finalEnums);
+
                 } catch (error) {
                     setLoadingMessage('Error reading file. Check console for details.');
                     console.error('File Read Error:', error);
@@ -441,61 +497,108 @@ const App = () => {
             };
             reader.readAsText(file);
         }
-    }, [identifyEnumColumns]);
+    }, [saveSchema]);
 
-    // --- Modal Logic ---
 
-    const enumCols = useMemo(() => {
-        return headers.filter(h => enumColumns[h]?.isEnum);
-    }, [headers, enumColumns]);
+    // --- New Document / Add Column Modals ---
 
-    const openModal = useCallback(() => {
+    const openConfirmationModal = (action) => {
+        setConfirmationAction(action);
+        if (action === 'new_doc') {
+            setConfirmationMessage(
+                "Are you sure you want to start a new document? All current edits will be cleared. We recommend exporting your work first."
+            );
+            setNewColName('');
+        } else if (action === 'add_col') {
+            setConfirmationMessage('Define the properties for the new column:');
+            setNewColName('');
+            setIsNewColEnum(false);
+            setNewColOptionsText('');
+        }
+        setIsConfirmationModalOpen(true);
+    };
+
+    const confirmAction = useCallback(() => {
+        if (confirmationAction === 'new_doc') {
+            // Clear current data, but keep schema
+            setData([]);
+            setLoadingMessage(null);
+        } else if (confirmationAction === 'add_col') {
+            const trimmedColName = newColName.trim();
+            if (trimmedColName && !headers.includes(trimmedColName)) {
+
+                const updatedHeaders = [...headers, trimmedColName];
+
+                // Update data: add the new column with empty values
+                const updatedData = data.map(row => ({ ...row, [trimmedColName]: '' }));
+
+                // Prepare options set
+                const newOptions = isNewColEnum
+                    ? new Set(newColOptionsText.split('\n').map(line => line.trim()).filter(line => line !== ''))
+                    : new Set();
+
+                // Update Enums
+                const updatedEnums = {
+                    ...enumColumns,
+                    [trimmedColName]: { isEnum: isNewColEnum, options: newOptions }
+                };
+
+                setHeaders(updatedHeaders);
+                setData(updatedData);
+                setEnumColumns(updatedEnums);
+
+                // Save the updated schema immediately
+                saveSchema(updatedHeaders, updatedEnums);
+            }
+        }
+        // Always close modal and clear add column state after attempt
+        setIsConfirmationModalOpen(false);
+        setNewColName('');
+        setIsNewColEnum(false);
+        setNewColOptionsText('');
+    }, [confirmationAction, newColName, isNewColEnum, newColOptionsText, headers, data, enumColumns, saveSchema]);
+
+    // Helper to sync schema state after option management
+    useEffect(() => {
+        if (isOptionModalOpen === false && modalColumn !== null) {
+            // Only trigger save if we were managing options and the state has settled
+            saveSchema(headers, enumColumns);
+        }
+    }, [isOptionModalOpen, modalColumn, headers, enumColumns, saveSchema]);
+
+
+    // --- Option Management Modal Logic ---
+    const enumCols = useMemo(() => headers.filter(h => enumColumns[h]?.isEnum), [headers, enumColumns]);
+
+    const openOptionModal = () => {
         if (enumCols.length === 0) {
-            // Using a custom div instead of alert()
             const msgBox = document.getElementById('message-box');
-            msgBox.innerHTML = `<p class="text-sm text-red-500 p-2 bg-red-100 rounded-lg">No enum columns detected (Unique values <= ${ENUM_THRESHOLD}).</p>`;
+            msgBox.innerHTML = `<p class="text-sm text-red-500 p-2 bg-red-100 rounded-lg">No enum columns available to manage. Add a new enum column first.</p>`;
             setTimeout(() => msgBox.innerHTML = '', 3000);
             return;
         }
-
         const initialCol = enumCols[0];
         setModalColumn(initialCol);
 
         const optionsArray = Array.from(enumColumns[initialCol].options).sort();
         setModalOptionsText(optionsArray.join('\n'));
-        setModalMessage('');
-        setIsModalOpen(true);
-    }, [enumCols, enumColumns]);
+        setIsOptionModalOpen(true);
+    };
 
-    const closeModal = useCallback(() => {
-        setIsModalOpen(false);
-        setModalColumn(null);
-        setModalMessage('');
-        setModalOptionsText('');
-    }, []);
-
-    const handleColumnSelectChange = useCallback((e) => {
+    const handleColumnSelectChange = (e) => {
         const selectedCol = e.target.value;
         setModalColumn(selectedCol);
-
         const optionsArray = Array.from(enumColumns[selectedCol].options).sort();
         setModalOptionsText(optionsArray.join('\n'));
-        setModalMessage('');
-    }, [enumColumns]);
+    };
 
-    const saveOptions = useCallback(() => {
+    const saveOptions = () => {
         if (!modalColumn) return;
 
         const newOptionsArray = modalOptionsText
             .split('\n')
             .map(line => line.trim())
             .filter(line => line !== '');
-
-        if (newOptionsArray.length === 0) {
-            setMessageType('error');
-            setModalMessage('Options list cannot be empty. Please add at least one option.');
-            return;
-        }
 
         // Update global state
         setEnumColumns(prevEnums => ({
@@ -506,52 +609,170 @@ const App = () => {
             }
         }));
 
-        // Display success message
-        setMessageType('success');
-        setModalMessage(`Options for '${modalColumn}' saved successfully!`);
+        setIsOptionModalOpen(false);
+        // Schema save is handled by the useEffect hook after the modal closes
+    };
 
-        // Let the useEffect hook handle the IndexedDB save automatically
-        setTimeout(closeModal, 1000);
-    }, [modalColumn, modalOptionsText, closeModal]);
 
-    const modalClasses = isModalOpen ? "fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-75" : "hidden";
-    const modalCardClasses = isModalOpen
-        ? "bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 m-4 transition-all duration-300 transform scale-100 opacity-100"
-        : "bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 m-4 transition-all duration-300 transform scale-95 opacity-0";
+    // --- Modal Markup ---
+    const confirmationModal = (
+        <div className={isConfirmationModalOpen ? "fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-75" : "hidden"}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 m-4">
+                <h2 className="text-xl font-bold mb-4">
+                    {confirmationAction === 'new_doc' ? 'Confirm New Document' : 'Add New Column'}
+                </h2>
+                <p className="text-gray-700 mb-4">{confirmationMessage}</p>
 
-    // --- Rendering ---
+                {confirmationAction === 'add_col' && (
+                    <div className="space-y-4">
+                        <input
+                            type="text"
+                            placeholder="Column Name (e.g., 'Sentiment_Score')"
+                            value={newColName}
+                            onChange={(e) => setNewColName(e.target.value)}
+                            className="editable-cell p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 w-full"
+                        />
+                        {headers.includes(newColName.trim()) && (
+                            <p className="text-red-500 text-sm">A column with this name already exists.</p>
+                        )}
+
+                        <div className="flex items-center space-x-2 p-2 bg-gray-50 rounded-lg">
+                            <input
+                                id="is-enum-checkbox"
+                                type="checkbox"
+                                checked={isNewColEnum}
+                                onChange={(e) => setIsNewColEnum(e.target.checked)}
+                                className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                            />
+                            <label htmlFor="is-enum-checkbox" className="text-sm font-medium text-gray-700 select-none">
+                                Is this an Enum (dropdown) column?
+                            </label>
+                        </div>
+
+                        {isNewColEnum && (
+                            <div>
+                                <label htmlFor="new-col-options" className="block text-sm font-medium text-gray-700 mb-1">
+                                    Enum Options (one per line):
+                                </label>
+                                <textarea
+                                    id="new-col-options"
+                                    rows="4"
+                                    placeholder="Option A\nOption B\nOption C"
+                                    value={newColOptionsText}
+                                    onChange={(e) => setNewColOptionsText(e.target.value)}
+                                    className="editable-cell resize-y p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 w-full text-sm"
+                                />
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                <div className="flex justify-end space-x-3 mt-6">
+                    {confirmationAction === 'new_doc' && (
+                        <button
+                            onClick={exportData}
+                            className="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-3 rounded-lg text-sm transition duration-150">
+                            Export First
+                        </button>
+                    )}
+                    <button
+                        onClick={() => setIsConfirmationModalOpen(false)}
+                        className="bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-2 px-3 rounded-lg text-sm transition duration-150">
+                        Cancel
+                    </button>
+                    <button
+                        onClick={confirmAction}
+                        disabled={confirmationAction === 'add_col' && (!newColName.trim() || headers.includes(newColName.trim()))}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-3 rounded-lg text-sm shadow-md transition duration-150 disabled:opacity-50">
+                        {confirmationAction === 'new_doc' ? 'Yes, Clear Data' : 'Add Column'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+
+    const optionManagementModal = (
+        <div className={isOptionModalOpen ? "fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-75" : "hidden"}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 m-4">
+                <h2 className="text-2xl font-bold mb-4">Manage Enum Options</h2>
+
+                <div className="mb-4">
+                    <label htmlFor="column-select" className="block text-sm font-medium text-gray-700 mb-1">Select Column:</label>
+                    <select
+                        id="column-select"
+                        className="editable-select text-sm"
+                        value={modalColumn || ''}
+                        onChange={handleColumnSelectChange}
+                        disabled={!modalColumn}
+                    >
+                        {enumCols.map(colName => (
+                            <option key={colName} value={colName}>{colName}</option>
+                        ))}
+                    </select>
+                </div>
+
+                <div className="mb-4">
+                    <label htmlFor="options-textarea" className="block text-sm font-medium text-gray-700 mb-1">Available Options (one per line):</label>
+                    <textarea
+                        id="options-textarea"
+                        rows="8"
+                        className="editable-cell resize-y text-sm"
+                        value={modalOptionsText}
+                        onChange={(e) => setModalOptionsText(e.target.value)}
+                        disabled={!modalColumn}
+                    ></textarea>
+                </div>
+
+                <div className="flex justify-end space-x-3">
+                    <button
+                        onClick={saveOptions}
+                        disabled={!modalColumn}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 disabled:opacity-50">
+                        Save Options
+                    </button>
+                    <button
+                        onClick={() => setIsOptionModalOpen(false)}
+                        className="bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-2 px-4 rounded-lg transition duration-150">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+
+    // --- Main Render ---
 
     return (
         <div className="p-4 md:p-8 min-h-screen">
-            <style>{`
-                /* Custom styles for the table and scrollbar */
-                .table-container::-webkit-scrollbar { width: 12px; height: 12px; }
-                .table-container::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 6px; border: 3px solid #f3f4f6; }
-                .table-container::-webkit-scrollbar-track { background-color: #f3f4f6; }
-                .editable-cell, .editable-select { transition: all 0.15s; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
-                .editable-cell:focus, .editable-select:focus { border-color: #3b82f6; outline: none; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25); }
-                th { position: sticky; top: 0; background-color: #ffffff; z-index: 10; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05); min-width: 150px; }
-                td { min-width: 150px; }
-            `}</style>
 
             {/* Title and Controls */}
             <div className="max-w-7xl mx-auto mb-6 bg-white p-6 rounded-xl shadow-lg">
-                <h1 className="text-3xl font-extrabold text-gray-900 mb-2">CSV Data Editor (React)</h1>
-                <p className="text-gray-600 mb-6">
-                    Edit data, manage dropdown options for categorical columns, and export the result.
-                    <span className="font-semibold text-indigo-500">Your edits are automatically saved to your browser's local storage.</span>
+                <h1 className="text-3xl font-extrabold text-gray-900 mb-2">CSV Annotation Editor</h1>
+                <p className="text-gray-600 mb-4">
+                    Edit annotations in the table below. The schema (headers and dropdown options) are saved automatically and carry over to new documents.
+                    <span className="font-semibold text-indigo-500">Your document edits are auto-saved locally.</span>
                 </p>
 
-                <div className="flex flex-wrap gap-4 items-center">
+                <div className="flex flex-wrap gap-3 items-center">
                     <button
-                        onClick={openModal}
-                        className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
-                        Manage Options
+                        onClick={() => openConfirmationModal('new_doc')}
+                        className="flex-shrink-0 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                        New Document
                     </button>
                     <button
                         onClick={exportData}
                         className="flex-shrink-0 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
-                        Export Data to CSV
+                        Export to CSV
+                    </button>
+                    <button
+                        onClick={() => openConfirmationModal('add_col')}
+                        className="flex-shrink-0 bg-yellow-600 hover:bg-yellow-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                        Add New Column
+                    </button>
+                    <button
+                        onClick={openOptionModal}
+                        className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                        Manage Options
                     </button>
                     <input
                         type="file"
@@ -570,7 +791,7 @@ const App = () => {
             <div className="max-w-7xl mx-auto bg-white rounded-xl shadow-lg overflow-hidden">
                 <div id="table-container" className="table-container p-4 overflow-x-auto overflow-y-auto max-h-[70vh]">
                     {loadingMessage ? (
-                        <p className="text-center text-gray-500 py-10">{loadingMessage}</p>
+                        <p className="text-center text-gray-500 py-10 text-lg font-medium">{loadingMessage}</p>
                     ) : (
                         <table id="data-table" className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
@@ -609,61 +830,8 @@ const App = () => {
                 </div>
             </div>
 
-            {/* Options Management Modal */}
-            <div className={modalClasses}>
-                <div className={modalCardClasses}>
-                    <h2 className="text-2xl font-bold mb-4">Manage Enum Options</h2>
-
-                    <div className="mb-4">
-                        <label htmlFor="column-select" className="block text-sm font-medium text-gray-700 mb-1">Select Column:</label>
-                        <select
-                            id="column-select"
-                            className="editable-select"
-                            value={modalColumn || ''}
-                            onChange={handleColumnSelectChange}
-                            disabled={!modalColumn}
-                        >
-                            {enumCols.map(colName => (
-                                <option key={colName} value={colName}>{colName}</option>
-                            ))}
-                        </select>
-                    </div>
-
-                    <div className="mb-4">
-                        <label htmlFor="options-textarea" className="block text-sm font-medium text-gray-700 mb-1">Available Options (one per line):</label>
-                        <textarea
-                            id="options-textarea"
-                            rows="8"
-                            className="editable-cell resize-y"
-                            value={modalOptionsText}
-                            onChange={(e) => setModalOptionsText(e.target.value)}
-                            disabled={!modalColumn}
-                        ></textarea>
-                    </div>
-
-                    {modalMessage && (
-                        <p className={`text-sm mb-4 ${messageType === 'error' ? 'text-red-500' : 'text-green-600'}`}>
-                            {modalMessage}
-                        </p>
-                    )}
-
-                    <div className="flex justify-end space-x-3">
-                        <button
-                            id="save-options-btn"
-                            onClick={saveOptions}
-                            disabled={!modalColumn}
-                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150 disabled:opacity-50">
-                            Save Changes
-                        </button>
-                        <button
-                            id="close-modal-btn"
-                            onClick={closeModal}
-                            className="bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-2 px-4 rounded-lg transition duration-150">
-                            Close
-                        </button>
-                    </div>
-                </div>
-            </div>
+            {optionManagementModal}
+            {confirmationModal}
         </div>
     )
 }
