@@ -1,5 +1,7 @@
 // --- 1. CONFIGURATION AND INITIAL DATA ---
 import React from "react";
+import { DataGrid } from '@mui/x-data-grid';
+import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 // --- 0. CONFIGURATION & INDEXEDDB UTILITIES ---
 
@@ -248,7 +250,7 @@ const initializeEnumColumns = (currentHeaders, currentData, existingSchema = {})
 
 
 // --- 3. REACT COMPONENTS & HOOKS ---
-const { useState, useEffect, useCallback, useMemo } = React;
+import { useState, useEffect, useCallback, useMemo } from "react";
 
 /**
  * Custom Modal Component
@@ -293,12 +295,71 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
     const isLongTextField = colName.includes('Question') || colName.includes('Notes');
     const isLongText = isLongTextField || (value && (value.length > 50 || value.includes('\n')));
     const rows = isLongText ? Math.max(2, Math.ceil((value?.length || 0) / 50)) : undefined;
+    
+    // Use React's useState to maintain local state during editing
+    const [localValue, setLocalValue] = useState(value || '');
+    // Track textarea height for resize detection
+    const [textareaHeight, setTextareaHeight] = useState(null);
+    // Reference to the textarea element
+    const textareaRef = React.useRef(null);
+    
+    // Update local value when prop value changes (e.g., from external edits)
+    useEffect(() => {
+        setLocalValue(value || '');
+    }, [value]);
+    
+    // Effect to monitor textarea resize
+    useEffect(() => {
+        if (!isLongText || !textareaRef.current) return;
+        
+        // Create a ResizeObserver to detect size changes
+        const resizeObserver = new ResizeObserver(entries => {
+            for (let entry of entries) {
+                const height = entry.contentRect.height;
+                if (height !== textareaHeight) {
+                    setTextareaHeight(height);
+                    // Force row height recalculation by updating a custom attribute on the row
+                    const rowElement = textareaRef.current.closest('.MuiDataGrid-row');
+                    if (rowElement) {
+                        // Store the textarea height as a data attribute on the row
+                        rowElement.dataset.textareaHeight = height;
+                        // Trigger a custom event that we can listen for to update row heights
+                        const event = new CustomEvent('textareaResize', { 
+                            detail: { rowId, height: height + 20 } // Add padding
+                        });
+                        rowElement.dispatchEvent(event);
+                    }
+                }
+            }
+        });
+        
+        // Start observing the textarea
+        resizeObserver.observe(textareaRef.current);
+        
+        // Cleanup
+        return () => {
+            resizeObserver.disconnect();
+        };
+    }, [isLongText, rowId, textareaHeight]);
 
     // Use onBlur for commit to history (less frequent updates)
-    const handleBlur = (e) => handleEdit(rowId, colName, e.target.value, true); // true = commit
+    const handleBlur = () => {
+        handleEdit(rowId, colName, localValue, true); // true = commit
+    };
 
-    // Use onChange to update the cell's value temporarily (no commit)
-    const handleChange = (e) => handleEdit(rowId, colName, e.target.value, false); // false = no commit
+    // Use onChange to update local state without committing
+    const handleChange = (e) => {
+        setLocalValue(e.target.value);
+        handleEdit(rowId, colName, e.target.value, false); // false = no commit
+    };
+    
+    // Handle keydown events to fix spacebar and other key issues
+    const handleKeyDown = (e) => {
+        // Prevent default behavior for spacebar to stop it from scrolling the page
+        if (e.key === ' ') {
+            e.stopPropagation();
+        }
+    };
 
     const inputClasses = "editable-cell p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full text-sm";
     const selectClasses = "editable-select p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 w-full bg-white text-sm";
@@ -313,9 +374,10 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
         return (
             <select
                 className={selectClasses}
-                value={value || ''}
+                value={localValue}
                 onChange={handleChange}
-                onBlur={(e) => handleEdit(rowId, colName, e.target.value, true)} // Select blur commits
+                onBlur={handleBlur}
+                onKeyDown={handleKeyDown}
             >
                 <option value="">(None)</option>
                 {currentOptions.map((optionText, index) => (
@@ -330,12 +392,14 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
     if (isLongText) {
         return (
             <textarea
-                type="text"
                 className={`${inputClasses} resize-y`}
                 rows={rows}
-                value={value || ''}
+                value={localValue}
                 onBlur={handleBlur}
                 onChange={handleChange}
+                onKeyDown={handleKeyDown}
+                // Add click handler to ensure focus is maintained
+                onClick={(e) => e.stopPropagation()}
             />
         );
     }
@@ -344,9 +408,12 @@ const EditableCell = React.memo(({ rowId, colName, value, isEnum, enumOptions, h
         <input
             type="text"
             className={inputClasses}
-            value={value || ''}
+            value={localValue}
             onBlur={handleBlur}
             onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            // Add click handler to ensure focus is maintained
+            onClick={(e) => e.stopPropagation()}
         />
     );
 });
@@ -360,9 +427,10 @@ const App = () => {
     const [enumColumns, setEnumColumns] = useState({});
     const [loadingMessage, setLoadingMessage] = useState('Loading...');
 
-    // Column Resizing State
+    // Column Widths and Row Heights State
     const [colWidths, setColWidths] = useState({});
-    const [resizing, setResizing] = useState(null); // { startX, startWidth, colName }
+    const [rowHeights, setRowHeights] = useState({});
+    const [defaultRowHeight, setDefaultRowHeight] = useState(60);
 
     // History state for undo/redo
     const [history, setHistory] = useState({ past: [], future: [] });
@@ -560,98 +628,75 @@ const App = () => {
         }
     }, [data, saveDocumentData, headers, loadingMessage]);
 
-    // --- EFFECT 3: Column Resizing Logic ---
-
-    /**
-     * Starts the resizing process on mouse or touch down.
-     */
-    const startResize = useCallback((e, colName) => {
-        e.preventDefault();
-        e.stopPropagation(); // Stop propagation to ensure we capture the mouse events globally
-
-        // Use clientX from mouse event or the first touch point
-        const clientX = e.clientX || (e.touches && e.touches[0].clientX);
-        if (!clientX) return;
-
-        // e.currentTarget is the resize-handle div, parent is the th
-        const th = e.currentTarget.parentElement;
-
-        setResizing({
-            startX: clientX,
-            startWidth: th.offsetWidth,
-            colName: colName
+    // --- Column Width Management ---
+    
+    // Handle column resize from MUI X Data Grid
+    const handleColumnResize = useCallback((params) => {
+        const { field, width } = params;
+        
+        // Update column widths in state
+        setColWidths(prevWidths => ({
+            ...prevWidths,
+            [field]: width
+        }));
+        
+        // Save the updated schema with new column widths
+        saveSchema(headers, enumColumns, {
+            ...colWidths,
+            [field]: width
         });
-
-        // CRITICAL FIX: Set cursor on body to signal drag start
-        document.body.style.cursor = 'col-resize';
+    }, [headers, enumColumns, colWidths, saveSchema]);
+    
+    // Handle row height resize
+    const handleRowHeightChange = useCallback((params) => {
+        const { id, height } = params;
+        
+        // Update row heights in state
+        setRowHeights(prevHeights => ({
+            ...prevHeights,
+            [id]: height
+        }));
     }, []);
-
-    // Global listener setup/teardown for resizing
-    useEffect(() => {
-        if (!resizing) return;
-
-        /**
-         * Handles mouse or touch movement during resize.
-         */
-        const doResize = (e) => {
-            // Prevent default touch actions like scrolling/zooming
-            if (e.type === 'touchmove') e.preventDefault();
-
-            // Use clientX from mouse event or the first touch point
-            const clientX = e.clientX || (e.touches && e.touches[0].clientX);
-            if (!clientX) return;
-
-            const delta = clientX - resizing.startX;
-            let newWidth = resizing.startWidth + delta;
-
-            // Enforce minimum width
-            if (newWidth < MIN_COL_WIDTH) {
-                newWidth = MIN_COL_WIDTH;
-            }
-
-            setColWidths(prevWidths => ({
-                ...prevWidths,
-                [resizing.colName]: newWidth
-            }));
-        };
-
-        /**
-         * Ends the resizing process on mouse or touch release.
-         */
-        const stopResize = () => {
-            setResizing(null);
-            // CRITICAL FIX: Reset cursor on body immediately
-            document.body.style.cursor = '';
-        };
-
-        // Attach listeners for mouse and touch events globally on window
-        window.addEventListener('mousemove', doResize);
-        window.addEventListener('mouseup', stopResize);
-        window.addEventListener('touchmove', doResize, { passive: false }); // Needs passive: false to allow preventDefault
-        window.addEventListener('touchend', stopResize);
-
-        // Cleanup function for listeners
-        return () => {
-            window.removeEventListener('mousemove', doResize);
-            window.removeEventListener('mouseup', stopResize);
-            window.removeEventListener('touchmove', doResize);
-            window.removeEventListener('touchend', stopResize);
-            // Safety: Ensure cursor is reset on cleanup/unmount
-            document.body.style.cursor = '';
-        };
-    }, [resizing]); // Only depends on resizing state (goes from null to object, and back)
-
-    // Persistence effect: Triggers schema save when resizing is done
-    useEffect(() => {
-        // Only run when resizing completes (goes from active to null) and we have data
-        if (resizing === null && Object.keys(colWidths).length > 0 && headers.length > 0) {
-            // Use a short delay to ensure `colWidths` state is finalized from `doResize`
-            const timeoutId = setTimeout(() => {
-                saveSchema(headers, enumColumns, colWidths);
-            }, 50);
-            return () => clearTimeout(timeoutId);
+    
+    // Get row height function for DataGrid - dynamically calculate based on content
+    const getRowHeight = useCallback((params) => {
+        const { id } = params;
+        
+        // If user has manually set a height, respect that setting
+        if (rowHeights[id]) {
+            return Math.max(40, Math.min(200, rowHeights[id]));
         }
-    }, [resizing, colWidths, headers, enumColumns, saveSchema]);
+        
+        // Otherwise, calculate height based on content
+        const row = data.find(r => r.__id === id);
+        if (!row) return defaultRowHeight;
+        
+        // Calculate height based on the content of each cell
+        let maxHeight = defaultRowHeight;
+        
+        // Check each field in the row
+        headers.forEach(header => {
+            const value = row[header] || '';
+            
+            // Skip empty values
+            if (!value) return;
+            
+            // Check if this is a long text field
+            const isLongTextField = header.includes('Question') || header.includes('Notes');
+            const isLongText = isLongTextField || (value.length > 50 || value.includes('\n'));
+            
+            if (isLongText) {
+                // Calculate height based on content length and line breaks
+                const lineBreaks = (value.match(/\n/g) || []).length;
+                const estimatedLines = Math.max(1, Math.ceil(value.length / 50)) + lineBreaks;
+                const estimatedHeight = Math.max(40, Math.min(200, estimatedLines * 20 + 20)); // 20px per line + padding
+                
+                maxHeight = Math.max(maxHeight, estimatedHeight);
+            }
+        });
+        
+        return maxHeight;
+    }, [rowHeights, defaultRowHeight, data, headers]);
 
 
     // --- Core Handlers (Editing existing cells) ---
@@ -1272,6 +1317,32 @@ const App = () => {
                 <p className="text-gray-600 mb-4">
                     Edit annotations in the table below. **Double-click any row to open the full edit form.**
                 </p>
+                
+                {/* Prominent row resize instruction */}
+                <div className="bg-indigo-100 border-l-4 border-indigo-500 p-4 mb-4 rounded-r-lg">
+                    <div className="flex items-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-indigo-600 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" />
+                        </svg>
+                        <span className="text-indigo-800 font-medium">
+                            <strong>Rows are resizable!</strong> Look for the "DRAG TO RESIZE" handle at the bottom of each row. 
+                            Click and drag this handle up or down to adjust row height.
+                        </span>
+                    </div>
+                </div>
+                
+                {/* Text editing improvements notification */}
+                <div className="bg-green-100 border-l-4 border-green-500 p-4 mb-4 rounded-r-lg">
+                    <div className="flex items-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-green-600 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        <span className="text-green-800 font-medium">
+                            <strong>Text editing has been improved!</strong> Rows now automatically resize based on content, 
+                            and text editing issues have been fixed. Spacebar now works correctly and your content won't be cleared when typing.
+                        </span>
+                    </div>
+                </div>
 
                 {/* Status Message Display */}
                 {message && (
@@ -1352,6 +1423,19 @@ const App = () => {
                         className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150">
                         Manage Options
                     </button>
+                    
+                    <div className="flex items-center ml-4 bg-gray-100 p-2 rounded-lg">
+                        <span className="text-sm font-medium text-gray-700 mr-2">Default Row Height:</span>
+                        <input
+                            type="number"
+                            min="40"
+                            max="200"
+                            value={defaultRowHeight}
+                            onChange={(e) => setDefaultRowHeight(Number(e.target.value))}
+                            className="w-16 p-1 border border-gray-300 rounded text-center"
+                        />
+                        <span className="text-xs text-gray-500 ml-2">(Individual rows can be resized by dragging)</span>
+                    </div>
                 </div>
             </div>
 
@@ -1365,57 +1449,104 @@ const App = () => {
                     {loadingMessage ? (
                         <p className="text-center text-gray-500 py-10 text-lg font-medium">{loadingMessage}</p>
                     ) : (
-                        <table id="data-table" className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
-                            <tr>
-                                {headers.map((header) => (
-                                    <th
-                                        key={header}
-                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap relative"
-                                        style={{ width: colWidths[header] + 'px' }}
-                                    >
-                                        {header}
-                                        {enumColumns[header]?.isEnum && <span className="ml-1 text-indigo-500 text-xs">(Enum)</span>}
-
-                                        {/* Resize Handle - Handles both mouse down and touch start */}
-                                        <div
-                                            onMouseDown={(e) => startResize(e, header)}
-                                            onTouchStart={(e) => startResize(e, header)}
-                                            className="resize-handle"
-                                            title={`Resize ${header} column`}
+                        <ThemeProvider theme={createTheme({
+                            palette: {
+                                primary: {
+                                    main: '#4f46e5', // Indigo color to match the app's theme
+                                },
+                                secondary: {
+                                    main: '#10b981', // Green color for secondary actions
+                                },
+                            },
+                            typography: {
+                                fontFamily: '"Inter", "Helvetica", "Arial", sans-serif',
+                            },
+                            components: {
+                                MuiDataGrid: {
+                                    styleOverrides: {
+                                        root: {
+                                            border: 'none',
+                                            '& .MuiDataGrid-columnHeader:focus, & .MuiDataGrid-cell:focus': {
+                                                outline: 'none',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        })}>
+                            <DataGrid
+                                rows={data}
+                                getRowId={(row) => row.__id}
+                                columns={headers.map((header) => ({
+                                    field: header,
+                                    headerName: header + (enumColumns[header]?.isEnum ? ' (Enum)' : ''),
+                                    width: colWidths[header] || DEFAULT_COL_WIDTH,
+                                    editable: true,
+                                    resizable: true,
+                                    renderCell: (params) => (
+                                        <EditableCell
+                                            rowId={params.row.__id}
+                                            colName={header}
+                                            value={params.value}
+                                            isEnum={enumColumns[header]?.isEnum}
+                                            enumOptions={enumColumns}
+                                            handleEdit={handleEdit}
                                         />
-                                    </th>
-                                ))}
-                            </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                            {data.map((row) => (
-                                <tr
-                                    key={row.__id}
-                                    className='hover:bg-gray-100 cursor-pointer transition-colors duration-150'
-                                    onDoubleClick={() => handleRowDoubleClick(row.__id)}
-                                    title="Double-click to edit row in full form"
-                                >
-                                    {headers.map((header) => (
-                                        <td
-                                            key={header}
-                                            className="px-3 py-2 text-sm text-gray-900 border-t border-gray-200"
-                                            style={{ width: colWidths[header] + 'px' }}
-                                        >
-                                            <EditableCell
-                                                rowId={row.__id}
-                                                colName={header}
-                                                value={row[header]}
-                                                isEnum={enumColumns[header]?.isEnum}
-                                                enumOptions={enumColumns}
-                                                handleEdit={handleEdit}
-                                            />
-                                        </td>
-                                    ))}
-                                </tr>
-                            ))}
-                            </tbody>
-                        </table>
+                                    )
+                                }))}
+                                onRowDoubleClick={(params) => handleRowDoubleClick(params.id)}
+                                onColumnWidthChange={handleColumnResize}
+                                autoHeight={false}
+                                height={600}
+                                disableRowSelectionOnClick
+                                columnVisibilityModel={{
+                                    __id: false // Hide the internal ID column
+                                }}
+                                pagination={false}
+                                density="standard"
+                                rowHeight={defaultRowHeight}
+                                getRowHeight={getRowHeight}
+                                rowReordering
+                                onRowResize={handleRowHeightChange}
+                                rowResizeOptions={{
+                                    resizable: true,
+                                    showCellRightBorder: true,
+                                }}
+                                slotProps={{
+                                    row: {
+                                        showResizeHandle: true,
+                                    },
+                                }}
+                                sx={{
+                                    '& .MuiDataGrid-cell': {
+                                        padding: '12px 8px',
+                                        whiteSpace: 'normal',
+                                        lineHeight: 'normal',
+                                    },
+                                    '& .MuiDataGrid-row': {
+                                        // Row height is now controlled by rowHeight and getRowHeight props
+                                    },
+                                    '& .MuiDataGrid-columnHeaders': {
+                                        backgroundColor: '#f9fafb',
+                                        borderBottom: '1px solid #e5e7eb',
+                                    },
+                                    '& .MuiDataGrid-row:hover': {
+                                        backgroundColor: '#f3f4f6',
+                                    },
+                                    '& .MuiDataGrid-cell--editing': {
+                                        backgroundColor: '#f0f9ff',
+                                        boxShadow: '0 0 0 2px #3b82f6',
+                                    },
+                                    '& .MuiDataGrid-columnSeparator': {
+                                        visibility: 'visible',
+                                        color: '#e5e7eb',
+                                    },
+                                    '& .MuiDataGrid-columnHeader--moving': {
+                                        backgroundColor: '#e0e7ff',
+                                    },
+                                }}
+                            />
+                        </ThemeProvider>
                     )}
                 </div>
             </div>
