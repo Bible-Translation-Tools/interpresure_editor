@@ -1,0 +1,106 @@
+name: 'Tauri Release'
+
+on:
+  push:
+    # Trigger this workflow when a tag starting with 'v' followed by digits (e.g., v1.0.0) is pushed
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  # The macOS build job runs on a macOS runner
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install
+      - name: Install Rust toolchain
+        # Using a fixed stable version is often safer for CI than 'stable'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Add x86_64 macOS Target
+        run: rustup target add x86_64-apple-darwin
+      - name: Build and Release (macOS)
+        uses: tauri-apps/tauri-action@v0 # Use the latest version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Automatically passed by GitHub
+        with:
+          # Builds the macOS app (.app and .dmg)
+          tagName: ${{ github.ref_name }}
+          releaseName: 'App Release ${{ github.ref_name }}'
+          args: --target universal-apple-darwin
+
+  # --------------------------------------------------------------------------------------------------
+
+  # The Windows build job runs on a Windows runner
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        # Add the MSVC target for good measure, though the runner handles most of this
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build and Release (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Builds the Windows app (.msi installer)
+          tagName: ${{ github.ref_name }}
+          releaseName: 'App Release ${{ github.ref_name }}'
+          args: --target x86_64-pc-windows-msvc
+          # Note: Code signing for Windows requires additional secrets setup
+
+  # --------------------------------------------------------------------------------------------------
+
+  # The Linux build job runs on a Linux runner
+  linux-build:
+    runs-on: ubuntu-latest
+    # Linux builds require extra dependencies for AppImage creation
+    container:
+      image: ivangabriele/tauri:debian-bullseye-20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build and Release (Linux)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Builds the Linux app (usually .AppImage)
+          tagName: ${{ github.ref_name }}
+          releaseName: 'App Release ${{ github.ref_name }}'
+          args: --target x86_64-unknown-linux-gnu
