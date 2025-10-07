@@ -10,8 +10,8 @@ const DATA_KEY = 'current_csv_data'; // The current table content (transient)
 const SCHEMA_KEY = 'persistent_csv_schema'; // Headers, Enum options, and Column Widths (persistent)
 
 // Constants for Resizing
-const MIN_COL_WIDTH = 150;
-const DEFAULT_COL_WIDTH = 250;
+const MIN_COL_WIDTH = 100;
+const DEFAULT_COL_WIDTH = 150;
 
 // Static list of columns that must be treated as Enums
 const STATIC_ENUM_COLUMNS = [
@@ -1263,10 +1263,11 @@ const App = () => {
     // --- Main Render ---
 
     return (
-        <div className="p-4 md:p-8 min-h-screen">
+        // CRITICAL FIX: Changed h-full to h-screen to ensure the outer container is exactly 100% of the viewport height, preventing the entire page from scrolling.
+        <div className="p-4 md:p-8 h-screen flex flex-col">
 
-            {/* Title and Controls */}
-            <div className="mb-6 bg-white p-6 rounded-xl shadow-lg">
+            {/* Title and Controls (This section has fixed height, flex-shrink-0) */}
+            <div className="mb-6 bg-white p-6 rounded-xl shadow-lg flex-shrink-0">
                 <h1 className="text-3xl font-extrabold text-gray-900 mb-2">CSV Annotation Editor</h1>
                 <p className="text-gray-600 mb-4">
                     Edit annotations in the table below. **Double-click any row to open the full edit form.**
@@ -1358,8 +1359,9 @@ const App = () => {
             <div id="message-box" className="mb-4 h-6"></div>
 
             {/* Data Table Container (Scrollable) */}
-            <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-                <div id="table-container" className="table-container p-4 overflow-x-auto overflow-y-auto max-h-[70vh]">
+            <div className="bg-white rounded-xl shadow-lg overflow-hidden flex-grow flex flex-col min-h-0">
+                {/* The inner div now has the primary vertical scroll */}
+                <div id="table-container" className="table-container p-4 overflow-x-auto overflow-y-auto flex-grow">
                     {loadingMessage ? (
                         <p className="text-center text-gray-500 py-10 text-lg font-medium">{loadingMessage}</p>
                     ) : (
